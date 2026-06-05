@@ -20,7 +20,7 @@ const QRCode = require('qrcode');
 const { generateResponse } = require('./ai-agent');
 const { MessageQueue, sleep } = require('./message-queue');
 const { updateCRMLevel, extractNameFromMessage } = require('./crm-service');
-const { getAIConfig, saveMessage } = require('./supabase-sync');
+const { getAIConfig, getCoursesForPrompt, saveMessage, getCRMContact, getRecentChats } = require('./supabase-sync');
 
 // Directorio persistente para la sesión
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_session');
@@ -125,6 +125,19 @@ class WhatsAppManager {
                 this.retryCount = 0;
                 this.retryDelay = 3000;
                 this.currentQR = null;
+
+                // Si no hay chats en caché (por ejemplo, tras un reinicio del servidor),
+                // cargamos los recientes desde Supabase para poblar la lista
+                if (this.chatsCache.size === 0) {
+                    console.log('[WA] 🔄 Caché de chats vacío. Cargando desde BD...');
+                    getRecentChats(50).then(chats => {
+                        if (chats && chats.length > 0) {
+                            chats.forEach(chat => this.chatsCache.set(chat.jid, chat));
+                            this.io.emit('wa:chats_loaded', { chats });
+                            console.log(`[WA] 📋 ${chats.length} chats recuperados de la BD`);
+                        }
+                    }).catch(err => console.error('Error cargando chats BD:', err));
+                }
 
                 io.emit('wa:connected', {
                     status: 'connected',

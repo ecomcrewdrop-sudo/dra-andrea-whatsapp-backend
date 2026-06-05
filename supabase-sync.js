@@ -29,8 +29,8 @@ async function getCourses() {
     try {
         const { data, error } = await supabase
             .from('courses')
-            .select('id, title, description, price, category, status, image_url')
-            .eq('status', 'active')
+            .select('id, title, description, price, category, active, image_url')
+            .eq('active', true)
             .order('created_at', { ascending: false });
 
         if (error) throw error;
@@ -152,6 +152,61 @@ async function getMessageHistory(chatId, limit = 50) {
 }
 
 /**
+ * Obtiene los chats recientes agrupados desde el historial de la BD
+ * Esto es necesario porque al reiniciar el servidor, Baileys no re-descarga chats antiguos.
+ */
+async function getRecentChats(limit = 50) {
+    try {
+        // En Supabase no hay GROUP BY nativo simple vía SDK sin RPC, así que ordenamos
+        // y agrupamos en memoria, o usamos una vista. Para hacerlo robusto y simple,
+        // traemos los últimos 500 mensajes y los agrupamos por chat_id.
+        const { data: msgs, error } = await supabase
+            .from('whatsapp_messages')
+            .select('chat_id, phone, message, created_at, direction, ai_generated')
+            .order('created_at', { ascending: false })
+            .limit(500);
+
+        if (error) throw error;
+        
+        const chats = new Map();
+        for (const msg of (msgs || [])) {
+            if (!chats.has(msg.chat_id)) {
+                chats.set(msg.chat_id, {
+                    jid: msg.chat_id,
+                    phone: msg.phone,
+                    lastMessage: msg.message,
+                    lastTime: new Date(msg.created_at).getTime(),
+                    direction: msg.direction,
+                    unreadCount: 0 // Si queremos podríamos calcularlo, pero dejémoslo en 0 para historicos
+                });
+            }
+        }
+
+        // Consultamos los nombres en el CRM para esos números
+        const chatArray = Array.from(chats.values()).slice(0, limit);
+        if (chatArray.length > 0) {
+            const phones = chatArray.map(c => c.phone);
+            const { data: crmData } = await supabase
+                .from('whatsapp_crm')
+                .select('phone, name')
+                .in('phone', phones);
+                
+            if (crmData) {
+                const nameMap = new Map(crmData.map(c => [c.phone, c.name]));
+                chatArray.forEach(c => {
+                    c.name = nameMap.get(c.phone) || c.phone;
+                });
+            }
+        }
+
+        return chatArray;
+    } catch (err) {
+        console.error('[SUPABASE] Error obteniendo chats recientes:', err.message);
+        return [];
+    }
+}
+
+/**
  * Obtiene datos CRM de un contacto
  */
 async function getCRMContact(phone) {
@@ -216,6 +271,7 @@ module.exports = {
     saveAIConfig,
     saveMessage,
     getMessageHistory,
+    getRecentChats,
     getCRMContact,
     upsertCRMContact,
     invalidateCache
