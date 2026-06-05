@@ -187,7 +187,7 @@ io.on('connection', (socket) => {
     }
 
     // ✅ Si WhatsApp ya está conectado, enviar chats cacheados INMEDIATAMENTE
-    if (waManager.isConnected && waManager.chatsCache.size > 0) {
+    if (waManager.isConnected) {
         const chatList = [...waManager.chatsCache.values()]
             .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
             .slice(0, 50);
@@ -220,12 +220,10 @@ io.on('connection', (socket) => {
 
     // Cliente pide refrescar lista de chats manualmente
     socket.on('wa:get_chats', () => {
-        if (waManager.chatsCache.size > 0) {
-            const chatList = [...waManager.chatsCache.values()]
-                .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
-                .slice(0, 50);
-            socket.emit('wa:chats_loaded', { chats: chatList });
-        }
+        const chatList = [...waManager.chatsCache.values()]
+            .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
+            .slice(0, 50);
+        socket.emit('wa:chats_loaded', { chats: chatList });
     });
 
     socket.on('disconnect', () => {
