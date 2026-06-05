@@ -219,10 +219,13 @@ class WhatsAppManager {
         
         chats.forEach(chat => {
             if (!isJidGroup(chat.id)) {
+                const isLid = chat.id.includes('@lid');
+                const rawPhone = chat.id.replace('@s.whatsapp.net', '').replace('@lid', '');
                 this.chatsCache.set(chat.id, {
                     jid: chat.id,
-                    phone: chat.id.replace('@s.whatsapp.net', ''),
-                    name: chat.name || this.contactNames.get(chat.id) || chat.id.replace('@s.whatsapp.net', ''),
+                    phone: rawPhone,
+                    isLid: isLid,
+                    name: chat.name || this.contactNames.get(chat.id) || (isLid ? 'Contacto Anuncio' : rawPhone),
                     unreadCount: chat.unreadCount || 0,
                     lastTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now()
                 });
@@ -249,29 +252,34 @@ class WhatsAppManager {
         if (!msg.message) return;
 
         const jid = msg.key.remoteJid;
-        const phone = jid.replace('@s.whatsapp.net', '');
+        const isLid = jid.includes('@lid');
+        const phone = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
 
         // Extraer texto del mensaje
         const text = this.extractMessageText(msg);
         if (!text || text.trim().length === 0) return;
 
         // Nombre del contacto
-        const senderName = msg.pushName || this.contactNames.get(jid) || phone;
+        const senderName = msg.pushName || this.contactNames.get(jid) || (isLid ? 'Contacto Anuncio' : phone);
         if (msg.pushName) this.contactNames.set(jid, msg.pushName);
 
-        console.log(`[WA] 📩 Mensaje de ${senderName} (${phone}): "${text.substring(0, 60)}"`);
+        console.log(`[WA] 📩 Mensaje de ${senderName} (${isLid ? 'LID' : phone}): "${text.substring(0, 60)}"`);
 
         // Actualizar cache de chats
         this.chatsCache.set(jid, {
             jid,
             phone,
+            isLid,
             name: senderName,
             lastMessage: text.substring(0, 60),
             lastTime: Date.now()
         });
 
-        // Simular lectura (anti-ban)
-        try { await sock.readMessages([msg.key]); } catch {}
+        // Simular lectura (anti-ban) y suscribir a presencia
+        try { 
+            await sock.readMessages([msg.key]); 
+            await sock.presenceSubscribe(jid);
+        } catch {}
 
         // Guardar en historial
         await saveMessage(jid, phone, 'incoming', text, false);

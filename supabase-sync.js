@@ -171,9 +171,12 @@ async function getRecentChats(limit = 50) {
         const chats = new Map();
         for (const msg of (msgs || [])) {
             if (!chats.has(msg.chat_id)) {
+                const isLid = msg.chat_id.includes('@lid');
+                const rawPhone = msg.chat_id.replace('@s.whatsapp.net', '').replace('@lid', '');
                 chats.set(msg.chat_id, {
                     jid: msg.chat_id,
-                    phone: msg.phone,
+                    phone: rawPhone,
+                    isLid: isLid,
                     lastMessage: msg.message,
                     lastTime: new Date(msg.created_at).getTime(),
                     direction: msg.direction,
@@ -194,7 +197,11 @@ async function getRecentChats(limit = 50) {
             if (crmData) {
                 const nameMap = new Map(crmData.map(c => [c.phone, c.name]));
                 chatArray.forEach(c => {
-                    c.name = nameMap.get(c.phone) || c.phone;
+                    c.name = nameMap.get(c.phone) || (c.isLid ? 'Contacto Anuncio' : c.phone);
+                });
+            } else {
+                chatArray.forEach(c => {
+                    if (!c.name) c.name = c.isLid ? 'Contacto Anuncio' : c.phone;
                 });
             }
         }
