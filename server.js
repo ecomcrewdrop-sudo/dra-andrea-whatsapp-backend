@@ -23,16 +23,20 @@ const allowedOrigins = [
     'http://localhost:3000',
     'http://localhost:5500',
     'http://127.0.0.1:5500',
-    /\.railway\.app$/,  // Permite previews de Railway
+    /\.railway\.app$/,
+    /\.onrender\.com$/,
+    /andreavargas\.art$/,
 ];
 
 app.use(cors({
     origin: (origin, callback) => {
-        // Permite requests sin origin (Postman, servidor mismo)
+        // Permite requests sin origin (Postman, archivo local file://, servidor mismo)
         if (!origin) return callback(null, true);
         const allowed = allowedOrigins.some(o =>
             typeof o === 'string' ? o === origin : o.test(origin)
         );
+        // En desarrollo permitir todo
+        if (!allowed && process.env.NODE_ENV !== 'production') return callback(null, true);
         callback(null, allowed);
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
@@ -43,9 +47,9 @@ app.use(express.json({ limit: '10mb' }));
 // ── SOCKET.IO ────────────────────────────────────────────────
 const io = new Server(server, {
     cors: {
-        origin: allowedOrigins,
+        origin: '*',   // Permitimos cualquier origen — la auth es por token
         methods: ['GET', 'POST'],
-        credentials: true
+        credentials: false
     },
     pingTimeout: 60000,
     pingInterval: 25000
@@ -182,6 +186,20 @@ io.on('connection', (socket) => {
         socket.emit('wa:qr', { qr: waManager.currentQR });
     }
 
+    // ✅ Si WhatsApp ya está conectado, enviar chats cacheados INMEDIATAMENTE
+    if (waManager.isConnected && waManager.chatsCache.size > 0) {
+        const chatList = [...waManager.chatsCache.values()]
+            .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
+            .slice(0, 50);
+        socket.emit('wa:chats_loaded', { chats: chatList });
+        socket.emit('wa:connected', {
+            status: 'connected',
+            message: '¡WhatsApp conectado!',
+            timestamp: new Date().toISOString()
+        });
+        console.log(`[WS] Enviando ${chatList.length} chats cacheados al nuevo cliente`);
+    }
+
     // Cliente pide forzar reconexión
     socket.on('wa:reconnect', () => {
         console.log('[WS] Admin solicitó reconexión');
@@ -198,6 +216,16 @@ io.on('connection', (socket) => {
     // Cliente toggle IA en un chat
     socket.on('wa:toggle_ai', ({ jid, enabled }) => {
         waManager.toggleAI(jid, enabled);
+    });
+
+    // Cliente pide refrescar lista de chats manualmente
+    socket.on('wa:get_chats', () => {
+        if (waManager.chatsCache.size > 0) {
+            const chatList = [...waManager.chatsCache.values()]
+                .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
+                .slice(0, 50);
+            socket.emit('wa:chats_loaded', { chats: chatList });
+        }
     });
 
     socket.on('disconnect', () => {
