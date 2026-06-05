@@ -236,6 +236,13 @@ io.on('connection', (socket) => {
         }
     });
 
+    // Admin suscribe presencia de un chat (para ver "en línea", "escribiendo")
+    socket.on('wa:subscribe_presence', ({ jid }) => {
+        if (jid && waManager.sock && waManager.isConnected) {
+            waManager.sock.presenceSubscribe(jid).catch(() => {});
+        }
+    });
+
     socket.on('disconnect', () => {
         console.log(`[WS] 🔌 Admin desconectado: ${socket.id}`);
     });
