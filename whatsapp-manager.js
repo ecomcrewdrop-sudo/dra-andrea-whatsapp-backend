@@ -14,21 +14,15 @@ const {
     DisconnectReason,
     fetchLatestBaileysVersion,
     isJidGroup,
-    makeInMemoryStore,
-    jidNormalizedUser,
-    proto,
-    getAggregateVotesInPollMessage,
-    areJidsSameUser,
-    downloadContentFromMessage
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const { generateResponse } = require('./ai-agent');
 const { MessageQueue, sleep } = require('./message-queue');
 const { updateCRMLevel, extractNameFromMessage } = require('./crm-service');
-const { getAIConfig, saveMessage, getCRMContact, upsertCRMContact } = require('./supabase-sync');
+const { getAIConfig, saveMessage } = require('./supabase-sync');
 
-// Directorio persistente para la sesión (Railway Volume en /app/auth_session)
+// Directorio persistente para la sesión
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_session');
 
 // Logger silencioso (evita spam de logs de Baileys)
@@ -36,23 +30,25 @@ const logger = pino({ level: 'silent' });
 
 class WhatsAppManager {
     constructor(io) {
-        this.io = io;           // Socket.io para emitir al frontend
-        this.sock = null;       // Socket de WhatsApp
-        this.store = null;      // Store en memoria (metadata de chats)
-        this.queue = new MessageQueue(); // Queue de mensajes anti-ban
+        this.io = io;
+        this.sock = null;
+        this.queue = new MessageQueue();
         this.isConnected = false;
         this.currentQR = null;
         this.retryCount = 0;
         this.MAX_RETRIES = 15;
         this.retryDelay = 3000;
         this.reconnectTimer = null;
-        
-        // Chats con IA desactivada manualmente por la doctora
+
+        // Chats con IA desactivada manualmente
         this.aiDisabledChats = new Set();
-        
+
+        // Cache simple de chats en memoria { jid: chatData }
+        this.chatsCache = new Map();
+
         // Cache de nombres de contactos { jid: name }
         this.contactNames = new Map();
-        
+
         // Asegurar que el directorio de sesión exista
         if (!fs.existsSync(AUTH_DIR)) {
             fs.mkdirSync(AUTH_DIR, { recursive: true });
@@ -64,37 +60,24 @@ class WhatsAppManager {
      */
     async connect() {
         console.log('[WA] 🔌 Iniciando conexión WhatsApp...');
-        
+
         try {
             const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
             const { version } = await fetchLatestBaileysVersion();
             console.log(`[WA] 📱 Usando WhatsApp Web v${version.join('.')}`);
 
-            // Store en memoria para metadata de chats y mensajes
-            this.store = makeInMemoryStore({ logger });
-            
             // Crear socket de WhatsApp con configuración anti-ban
             this.sock = makeWASocket({
                 version,
                 logger,
                 auth: state,
-                printQRInTerminal: false, // Nosotros lo manejamos vía WebSocket
-                syncFullHistory: false,   // Solo cargar chats recientes
+                printQRInTerminal: false,
+                syncFullHistory: false,
                 markOnlineOnConnect: true,
                 generateHighQualityLinkPreview: false,
-                // Simular un navegador Chrome real
                 browser: ['Andrea Vargas', 'Chrome', '124.0.6367.60'],
-                getMessage: async (key) => {
-                    if (this.store) {
-                        const msg = await this.store.loadMessage(key.remoteJid, key.id);
-                        return msg?.message || undefined;
-                    }
-                    return { conversation: '' };
-                }
+                getMessage: async () => ({ conversation: '' })
             });
-
-            // Vincular store al socket
-            this.store.bind(this.sock.ev);
 
             // === HANDLERS DE EVENTOS ===
             this.setupEventHandlers(saveCreds);
@@ -142,15 +125,12 @@ class WhatsAppManager {
                 this.retryCount = 0;
                 this.retryDelay = 3000;
                 this.currentQR = null;
-                
+
                 io.emit('wa:connected', {
                     status: 'connected',
                     message: '¡WhatsApp conectado exitosamente!',
                     timestamp: new Date().toISOString()
                 });
-
-                // Cargar chats iniciales
-                setTimeout(() => this.loadInitialChats(), 2000);
             }
 
             // Conexión cerrada
@@ -158,9 +138,9 @@ class WhatsAppManager {
                 this.isConnected = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                
+
                 console.log(`[WA] ⚠️ Conexión cerrada. Código: ${statusCode}. Reconectar: ${shouldReconnect}`);
-                
+
                 io.emit('wa:disconnected', {
                     status: 'disconnected',
                     code: statusCode,
@@ -170,7 +150,6 @@ class WhatsAppManager {
                 if (shouldReconnect) {
                     this.scheduleReconnect();
                 } else {
-                    // Sesión inválida — limpiar auth para pedir QR nuevo
                     this.clearSession();
                 }
             }
@@ -179,16 +158,31 @@ class WhatsAppManager {
         // ── MENSAJES ENTRANTES ───────────────────────────────────
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             if (type !== 'notify') return;
-
             for (const msg of messages) {
                 await this.handleIncomingMessage(msg);
             }
         });
 
-        // ── ACTUALIZACIÓN DE CHATS ───────────────────────────────
-        sock.ev.on('chats.update', (updates) => {
-            // Notificar al frontend que se actualizó algo
-            io.emit('wa:chats_update', { updates });
+        // ── CHATS (para mantener la lista actualizada) ────────────
+        sock.ev.on('chats.set', ({ chats }) => {
+            chats.forEach(chat => {
+                if (!isJidGroup(chat.id)) {
+                    this.chatsCache.set(chat.id, {
+                        jid: chat.id,
+                        phone: chat.id.replace('@s.whatsapp.net', ''),
+                        name: chat.name || this.contactNames.get(chat.id) || chat.id.replace('@s.whatsapp.net', ''),
+                        unreadCount: chat.unreadCount || 0,
+                        lastTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now()
+                    });
+                }
+            });
+
+            const chatList = [...this.chatsCache.values()]
+                .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
+                .slice(0, 50);
+
+            io.emit('wa:chats_loaded', { chats: chatList });
+            console.log(`[WA] 📋 ${chatList.length} chats enviados al frontend`);
         });
 
         // ── PRESENCIA (quién está escribiendo) ───────────────────
@@ -211,8 +205,8 @@ class WhatsAppManager {
 
         const jid = msg.key.remoteJid;
         const phone = jid.replace('@s.whatsapp.net', '');
-        
-        // Extraer texto del mensaje (soporta texto, imagen con caption, etc.)
+
+        // Extraer texto del mensaje
         const text = this.extractMessageText(msg);
         if (!text || text.trim().length === 0) return;
 
@@ -220,12 +214,19 @@ class WhatsAppManager {
         const senderName = msg.pushName || this.contactNames.get(jid) || phone;
         if (msg.pushName) this.contactNames.set(jid, msg.pushName);
 
-        console.log(`[WA] 📩 Mensaje de ${senderName} (${phone}): "${text.substring(0, 60)}..."`);
+        console.log(`[WA] 📩 Mensaje de ${senderName} (${phone}): "${text.substring(0, 60)}"`);
 
-        // Simular que leímos el mensaje (anti-ban: marcar como leído)
-        try {
-            await sock.readMessages([msg.key]);
-        } catch {}
+        // Actualizar cache de chats
+        this.chatsCache.set(jid, {
+            jid,
+            phone,
+            name: senderName,
+            lastMessage: text.substring(0, 60),
+            lastTime: Date.now()
+        });
+
+        // Simular lectura (anti-ban)
+        try { await sock.readMessages([msg.key]); } catch {}
 
         // Guardar en historial
         await saveMessage(jid, phone, 'incoming', text, false);
@@ -249,7 +250,7 @@ class WhatsAppManager {
         // ¿IA activa para este chat?
         const config = await getAIConfig();
         if (!config.auto_reply || this.aiDisabledChats.has(jid)) {
-            console.log(`[WA] 🔕 IA desactivada para ${phone}. No se responde automáticamente.`);
+            console.log(`[WA] 🔕 IA desactivada para ${phone}.`);
             return;
         }
 
@@ -273,7 +274,7 @@ class WhatsAppManager {
             const readDelay = 1000 + Math.random() * 2000;
             await sleep(readDelay);
 
-            // 3. Generar respuesta con GPT-4o (proceso paralelo al "typing")
+            // 3. Generar respuesta con GPT-4o (paralelo al typing)
             const responsePromise = generateResponse(jid, incomingText, senderName);
 
             // 4. Mostrar "escribiendo..." mientras genera
@@ -291,9 +292,9 @@ class WhatsAppManager {
 
             console.log(`[WA] ✅ Respuesta IA enviada a ${phone}`);
 
-            // 7. Guardar en historial y emitir al frontend
+            // 7. Guardar y emitir al frontend
             await saveMessage(jid, phone, 'outgoing', responseText, true);
-            
+
             io.emit('wa:message', {
                 jid,
                 phone,
@@ -322,7 +323,7 @@ class WhatsAppManager {
             await this.sock.sendMessage(jid, { text });
             const phone = jid.replace('@s.whatsapp.net', '');
             await saveMessage(jid, phone, 'outgoing', text, false);
-            
+
             this.io.emit('wa:message', {
                 jid,
                 phone,
@@ -337,33 +338,6 @@ class WhatsAppManager {
         } catch (err) {
             console.error('[WA] Error enviando mensaje manual:', err.message);
             return { success: false, error: err.message };
-        }
-    }
-
-    /**
-     * Carga los chats iniciales del store en memoria
-     */
-    async loadInitialChats() {
-        try {
-            if (!this.store) return;
-            const chats = this.store.chats.all();
-            const formattedChats = chats
-                .filter(c => !isJidGroup(c.id))
-                .slice(0, 50) // Top 50 chats recientes
-                .map(c => ({
-                    jid: c.id,
-                    phone: c.id.replace('@s.whatsapp.net', ''),
-                    name: c.name || this.contactNames.get(c.id) || c.id.replace('@s.whatsapp.net', ''),
-                    unreadCount: c.unreadCount || 0,
-                    lastMessage: c.conversationTimestamp
-                        ? new Date(Number(c.conversationTimestamp) * 1000).toISOString()
-                        : null
-                }));
-
-            this.io.emit('wa:chats_loaded', { chats: formattedChats });
-            console.log(`[WA] 📋 ${formattedChats.length} chats enviados al frontend`);
-        } catch (err) {
-            console.error('[WA] Error cargando chats:', err.message);
         }
     }
 
@@ -385,7 +359,7 @@ class WhatsAppManager {
     extractMessageText(msg) {
         const m = msg.message;
         if (!m) return '';
-        
+
         return m.conversation ||
                m.extendedTextMessage?.text ||
                m.imageMessage?.caption ||
@@ -403,7 +377,7 @@ class WhatsAppManager {
     scheduleReconnect() {
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         if (this.retryCount >= this.MAX_RETRIES) {
-            console.error('[WA] ❌ Máximo de reintentos alcanzado. Revisa tu conexión.');
+            console.error('[WA] ❌ Máximo de reintentos alcanzado.');
             this.io.emit('wa:error', { message: 'No se pudo reconectar. Recarga la página y escanea el QR.' });
             return;
         }
@@ -411,7 +385,7 @@ class WhatsAppManager {
         this.retryCount++;
         const delay = Math.min(this.retryDelay * Math.pow(1.5, this.retryCount - 1), 60000);
         console.log(`[WA] 🔄 Reintento ${this.retryCount}/${this.MAX_RETRIES} en ${Math.round(delay/1000)}s...`);
-        
+
         this.reconnectTimer = setTimeout(() => {
             this.connect();
         }, delay);
