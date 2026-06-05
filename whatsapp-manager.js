@@ -46,6 +46,9 @@ class WhatsAppManager {
         // Cache simple de chats en memoria { jid: chatData }
         this.chatsCache = new Map();
 
+        // Timers de seguimiento proactivo { jid: timeoutId }
+        this.followUpTimers = new Map();
+
         // Cache de nombres de contactos { jid: name }
         this.contactNames = new Map();
 
@@ -207,7 +210,14 @@ class WhatsAppManager {
 
         // ── PRESENCIA (quién está escribiendo) ───────────────────
         sock.ev.on('presence.update', ({ id, presences }) => {
-            io.emit('wa:presence', { jid: id, presences });
+            const presenceData = presences[id] || {};
+            io.emit('wa:presence', { 
+                jid: id, 
+                presences,
+                status: presenceData.lastKnownPresence,
+                lastSeen: presenceData.lastSeen ? new Date(presenceData.lastSeen * 1000).toISOString() : null,
+                isOnline: presenceData.lastKnownPresence === 'available'
+            });
         });
     }
 
@@ -252,6 +262,13 @@ class WhatsAppManager {
         if (!msg.message) return;
 
         const jid = msg.key.remoteJid;
+
+        // Cancelar timer de seguimiento si el usuario volvió a escribir
+        if (this.followUpTimers.has(jid)) {
+            clearTimeout(this.followUpTimers.get(jid));
+            this.followUpTimers.delete(jid);
+        }
+
         const isLid = jid.includes('@lid');
         const phone = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
 
@@ -311,6 +328,11 @@ class WhatsAppManager {
         queue.enqueue(jid, async () => {
             await this.sendAIResponse(jid, phone, text, senderName, config);
         });
+
+        // Programar seguimiento proactivo según nivel CRM
+        if (crmUpdate && config.auto_reply && !this.aiDisabledChats.has(jid)) {
+            this.scheduleFollowUp(jid, phone, crmUpdate.label, senderName);
+        }
     }
 
     /**
@@ -362,6 +384,47 @@ class WhatsAppManager {
             console.error(`[WA] ❌ Error enviando respuesta IA a ${phone}:`, err.message);
             await sock.sendPresenceUpdate('available', jid).catch(() => {});
         }
+    }
+
+    /**
+     * Programa un mensaje de seguimiento proactivo si el usuario no responde
+     */
+    scheduleFollowUp(jid, phone, crmLevel, senderName) {
+        const delays = { CALIENTE: 90 * 60 * 1000, INTERESADO: 4 * 60 * 60 * 1000 };
+        const delay = delays[crmLevel];
+        if (!delay) return;
+
+        // Cancelar timer previo
+        if (this.followUpTimers.has(jid)) clearTimeout(this.followUpTimers.get(jid));
+
+        const timer = setTimeout(async () => {
+            if (!this.isConnected) return;
+            this.followUpTimers.delete(jid);
+            
+            try {
+                const { generateFollowUp } = require('./ai-agent');
+                const followUpText = await generateFollowUp(jid, crmLevel, senderName);
+                if (!followUpText) return;
+
+                await this.sock.sendMessage(jid, { text: followUpText });
+                const { saveMessage } = require('./supabase-sync');
+                await saveMessage(jid, phone, 'outgoing', followUpText, true);
+
+                this.io.emit('wa:message', {
+                    jid, phone,
+                    name: 'Andrea (IA - Follow-up)',
+                    text: followUpText,
+                    direction: 'outgoing',
+                    ai_generated: true,
+                    timestamp: Date.now()
+                });
+                console.log(`[WA] 📨 Follow-up proactivo enviado a ${phone} (nivel ${crmLevel})`);
+            } catch (err) {
+                console.error('[WA] Error enviando follow-up:', err.message);
+            }
+        }, delay);
+
+        this.followUpTimers.set(jid, timer);
     }
 
     /**

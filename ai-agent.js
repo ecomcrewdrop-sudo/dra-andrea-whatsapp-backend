@@ -82,7 +82,19 @@ REGLAS IMPORTANTES:
 4. No inventes información que no te hemos dado sobre los cursos
 5. Si no sabes algo, di: "Déjame verificar eso y te confirmo 🙂"
 6. Los precios siempre en pesos colombianos
-7. Si hay urgencia (quiere inscribirse), dale el link de la plataforma: la URL de cursos del sitio web
+7. Si hay urgencia (quiere inscribirse), dale el link de la plataforma: https://andreavargas.art/cursos.html
+
+CUANDO ALGUIEN QUIERE INSCRIBIRSE O PAGAR:
+- Dales el link directo: https://andreavargas.art/cursos.html
+- El proceso es online, rápido (menos de 5 minutos) y 100% seguro
+- Garantía de satisfacción: 7 días de devolución sin preguntas
+
+INFORMACIÓN SOBRE LOS CURSOS:
+- TODOS nuestros cursos son 100% VIRTUALES y online. No tenemos cursos presenciales.
+- Se aprenden técnicas aplicables a la vida real con materiales fáciles de conseguir para practicar en casa.
+- Las grabaciones están disponibles para siempre.
+- El acceso es de por vida una vez inscritas.
+- Hay cupos limitados, así que es mejor asegurar el lugar pronto.
 
 Responde SOLO el siguiente mensaje. No agregues contexto extra. Sé tú misma — Andrea.`;
 }
@@ -169,4 +181,44 @@ function injectContext(jid, messages) {
     conversationHistory.set(jid, formatted.slice(-MAX_HISTORY));
 }
 
-module.exports = { generateResponse, clearHistory, injectContext };
+/**
+ * Genera mensaje de seguimiento proactivo para un lead
+ */
+async function generateFollowUp(jid, crmLevel, senderName) {
+    try {
+        const config = await getAIConfig();
+        const coursesInfo = await getCoursesForPrompt();
+        const client = getOpenAIClient(config?.openai_api_key);
+
+        const followUpPrompts = {
+            CALIENTE: `Eres Andrea Vargas. Le escribiste a ${senderName || 'esta persona'} hace un rato sobre tus cursos y no ha respondido. Mándale un mensaje breve, cálido y natural (máximo 2 líneas) para retomar la conversación con curiosidad genuina. No seas presionante. Recuerda el link si es natural mencionarlo: https://andreavargas.art/cursos.html\n\nCursos disponibles:\n${coursesInfo}`,
+            INTERESADO: `Eres Andrea Vargas. Una persona interesada en tus cursos no ha respondido en unas horas. Mándale un mensaje amigable preguntando si tiene alguna duda en la que puedas ayudar. Máximo 2 líneas, muy natural.`
+        };
+
+        const prompt = followUpPrompts[crmLevel] || followUpPrompts['INTERESADO'];
+        
+        const completion = await client.chat.completions.create({
+            model: config?.openai_model || 'gpt-4o',
+            messages: [{ role: 'system', content: prompt }],
+            max_tokens: 120,
+            temperature: 0.9
+        });
+
+        return completion.choices[0]?.message?.content?.trim();
+    } catch (err) {
+        console.error('[AI] Error generando follow-up:', err.message);
+        return null;
+    }
+}
+
+/**
+ * Detecta si el usuario quiere inscribirse/pagar
+ */
+function detectEnrollmentIntent(message) {
+    const keywords = ['inscrib', 'comprar', 'pagar', 'link de pago', 'cómo me anoto', 'como me anoto', 'quiero el curso', 'quiero inscrib', 'donde pago', 'dónde pago', 'link del curso', 'cómo accedo', 'como accedo'];
+    const lower = message.toLowerCase();
+    return keywords.some(kw => lower.includes(kw));
+}
+
+module.exports = { generateResponse, clearHistory, injectContext, generateFollowUp, detectEnrollmentIntent };
+
