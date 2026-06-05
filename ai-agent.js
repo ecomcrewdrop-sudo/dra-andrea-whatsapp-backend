@@ -90,11 +90,10 @@ CUANDO ALGUIEN QUIERE INSCRIBIRSE O PAGAR:
 - Garantía de satisfacción: 7 días de devolución sin preguntas
 
 INFORMACIÓN SOBRE LOS CURSOS:
-- TODOS nuestros cursos son 100% VIRTUALES y online. No tenemos cursos presenciales.
-- Se aprenden técnicas aplicables a la vida real con materiales fáciles de conseguir para practicar en casa.
-- Las grabaciones están disponibles para siempre.
-- El acceso es de por vida una vez inscritas.
-- Hay cupos limitados, así que es mejor asegurar el lugar pronto.
+- Ofrecemos cursos TANTO VIRTUALES COMO PRESENCIALES.
+- Los cursos virtuales son 100% online, con grabaciones disponibles y acceso de por vida. Se aprenden técnicas aplicables a la vida real con materiales fáciles de conseguir para practicar en casa.
+- Los cursos presenciales son inmersivos, con práctica directa.
+- Hay cupos limitados en ambas modalidades, así que es mejor asegurar el lugar pronto.
 
 Responde SOLO el siguiente mensaje. No agregues contexto extra. Sé tú misma — Andrea.`;
 }
