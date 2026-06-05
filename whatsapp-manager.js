@@ -164,31 +164,63 @@ class WhatsAppManager {
         });
 
         // ── CHATS (para mantener la lista actualizada) ────────────
-        sock.ev.on('chats.set', ({ chats }) => {
-            chats.forEach(chat => {
-                if (!isJidGroup(chat.id)) {
-                    this.chatsCache.set(chat.id, {
-                        jid: chat.id,
-                        phone: chat.id.replace('@s.whatsapp.net', ''),
-                        name: chat.name || this.contactNames.get(chat.id) || chat.id.replace('@s.whatsapp.net', ''),
-                        unreadCount: chat.unreadCount || 0,
-                        lastTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now()
-                    });
+        sock.ev.on('chats.upsert', chats => this.updateChatsCache(chats));
+        sock.ev.on('chats.set', ({ chats }) => this.updateChatsCache(chats));
+        sock.ev.on('chats.update', chats => this.updateChatsCache(chats));
+
+        // Evento de historial inicial
+        sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }) => {
+            console.log(`[WA] 📥 Recibido historial de sincronización: ${chats.length} chats`);
+            
+            if (contacts) {
+                contacts.forEach(contact => {
+                    if (contact.name || contact.pushname) {
+                        this.contactNames.set(contact.id, contact.name || contact.pushname);
+                    }
+                });
+            }
+            
+            this.updateChatsCache(chats);
+        });
+
+        // ── CONTACTOS ────────────────────────────────────────────
+        sock.ev.on('contacts.upsert', (contacts) => {
+            contacts.forEach(contact => {
+                if (contact.name || contact.pushname) {
+                    this.contactNames.set(contact.id, contact.name || contact.pushname);
                 }
             });
-
-            const chatList = [...this.chatsCache.values()]
-                .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
-                .slice(0, 50);
-
-            io.emit('wa:chats_loaded', { chats: chatList });
-            console.log(`[WA] 📋 ${chatList.length} chats enviados al frontend`);
         });
 
         // ── PRESENCIA (quién está escribiendo) ───────────────────
         sock.ev.on('presence.update', ({ id, presences }) => {
             io.emit('wa:presence', { jid: id, presences });
         });
+    }
+
+    /**
+     * Actualiza el cache de chats y emite al frontend
+     */
+    updateChatsCache(chats) {
+        if (!chats || !Array.isArray(chats)) return;
+        
+        chats.forEach(chat => {
+            if (!isJidGroup(chat.id)) {
+                this.chatsCache.set(chat.id, {
+                    jid: chat.id,
+                    phone: chat.id.replace('@s.whatsapp.net', ''),
+                    name: chat.name || this.contactNames.get(chat.id) || chat.id.replace('@s.whatsapp.net', ''),
+                    unreadCount: chat.unreadCount || 0,
+                    lastTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now()
+                });
+            }
+        });
+
+        const chatList = [...this.chatsCache.values()]
+            .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
+            .slice(0, 50);
+
+        this.io.emit('wa:chats_loaded', { chats: chatList });
     }
 
     /**
