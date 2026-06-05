@@ -227,6 +227,15 @@ io.on('connection', (socket) => {
         socket.emit('wa:chats_loaded', { chats: chatList });
     });
 
+    // Cliente envía mensaje manual desde el panel
+    socket.on('wa:send_message', async ({ jid, text }) => {
+        if (!jid || !text) return;
+        const result = await waManager.sendManualMessage(jid, text);
+        if (!result.success) {
+            socket.emit('wa:error', { message: 'No se pudo enviar el mensaje: ' + (result.error || '') });
+        }
+    });
+
     socket.on('disconnect', () => {
         console.log(`[WS] 🔌 Admin desconectado: ${socket.id}`);
     });
