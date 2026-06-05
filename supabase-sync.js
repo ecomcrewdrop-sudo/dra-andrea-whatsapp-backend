@@ -46,7 +46,25 @@ async function getCourses() {
 }
 
 /**
- * Formatea los cursos para inyectar en el prompt de IA
+ * Inicializa la escucha en tiempo real para mantener el bot sincronizado con la BD
+ */
+function initRealtimeListener() {
+    supabase
+        .channel('custom-courses-channel')
+        .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'courses' },
+            (payload) => {
+                console.log('[SUPABASE] 🔄 Cambio detectado en tabla courses (Evento:', payload.eventType, '). Invalidando caché...');
+                invalidateCache();
+            }
+        )
+        .subscribe();
+    console.log('[SUPABASE] 📡 Escucha en tiempo real activada para tabla courses.');
+}
+
+/**
+ * Formatea los cursos para inyectar en el prompt de IA con el máximo nivel de detalle
  */
 async function getCoursesForPrompt() {
     const courses = await getCourses();
@@ -54,8 +72,12 @@ async function getCoursesForPrompt() {
 
     return courses.map(c => {
         const price = c.price ? `$${Number(c.price).toLocaleString('es-CO')} COP` : 'Precio a consultar';
-        return `- **${c.title}**: ${c.description?.substring(0, 120) || 'Curso profesional'}... | Precio: ${price}`;
-    }).join('\n');
+        const type = c.category?.toLowerCase() === 'virtual' ? 'Modalidad: VIRTUAL' 
+                   : c.category?.toLowerCase() === 'presential' ? 'Modalidad: PRESENCIAL' 
+                   : `Categoría: ${c.category || 'General'}`;
+        
+        return `- **${c.title}** (${type})\n  Precio: ${price}\n  Detalle: ${c.description || 'Consulta para más detalles'}`;
+    }).join('\n\n');
 }
 
 /**
@@ -281,5 +303,6 @@ module.exports = {
     getRecentChats,
     getCRMContact,
     upsertCRMContact,
-    invalidateCache
+    invalidateCache,
+    initRealtimeListener
 };

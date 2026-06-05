@@ -10,9 +10,12 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const WhatsAppManager = require('./whatsapp-manager');
-const { getAIConfig, saveAIConfig, getMessageHistory, getCRMContact, upsertCRMContact } = require('./supabase-sync');
+const { getAIConfig, saveAIConfig, getMessageHistory, getCRMContact, upsertCRMContact, initRealtimeListener } = require('./supabase-sync');
 const { addNote, markAsClient } = require('./crm-service');
 const { clearHistory, injectContext } = require('./ai-agent');
+
+// Iniciar escucha en tiempo real de BD
+initRealtimeListener();
 
 const app = express();
 const server = http.createServer(app);
