@@ -1,7 +1,7 @@
 /**
  * ============================================================
- * SUPABASE SYNC — Sincronización con la plataforma
- * Lee cursos, precios y config desde la BD en tiempo real
+ * SUPABASE SYNC v3 — Sincronizacion con la plataforma
+ * Con cache de config IA, retry, y realtime robusto
  * ============================================================
  */
 require('dotenv').config();
@@ -12,59 +12,89 @@ const supabase = createClient(
     process.env.SUPABASE_SERVICE_KEY
 );
 
-// Cache local para no sobrecargar la BD
+// ── CACHE DE CURSOS ──────────────────────────────────────────
 let coursesCache = null;
-let cacheTimestamp = 0;
-const CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+let coursesCacheTimestamp = 0;
+const COURSES_CACHE_TTL = 30 * 60 * 1000;
 
-/**
- * Obtiene todos los cursos activos (con caché)
- */
-async function getCourses() {
-    const now = Date.now();
-    if (coursesCache && (now - cacheTimestamp) < CACHE_TTL) {
-        return coursesCache;
-    }
+// ── CACHE DE CONFIG IA ───────────────────────────────────────
+let aiConfigCache = null;
+let aiConfigCacheTimestamp = 0;
+const AI_CONFIG_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
 
-    try {
-        const { data, error } = await supabase
-            .from('courses')
-            .select('id, title, description, price, category, active, image_url')
-            .eq('active', true)
-            .order('created_at', { ascending: false });
-
-        if (error) throw error;
-
-        coursesCache = data || [];
-        cacheTimestamp = now;
-        console.log(`[SUPABASE] ✅ ${coursesCache.length} cursos cargados al caché`);
-        return coursesCache;
-    } catch (err) {
-        console.error('[SUPABASE] Error cargando cursos:', err.message);
-        return coursesCache || []; // Retorna caché viejo si hay error
+// ── RETRY HELPER ─────────────────────────────────────────────
+async function withRetry(fn, retries = 2, delay = 1000) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            if (attempt === retries) throw err;
+            console.warn(`[SUPABASE] Reintentando operacion (intento ${attempt + 1}/${retries})...`);
+            await new Promise(r => setTimeout(r, delay * (attempt + 1)));
+        }
     }
 }
 
 /**
- * Inicializa la escucha en tiempo real para mantener el bot sincronizado con la BD
+ * Obtiene todos los cursos activos (con cache)
+ */
+async function getCourses() {
+    const now = Date.now();
+    if (coursesCache && (now - coursesCacheTimestamp) < COURSES_CACHE_TTL) {
+        return coursesCache;
+    }
+
+    try {
+        const data = await withRetry(async () => {
+            const { data, error } = await supabase
+                .from('courses')
+                .select('id, title, description, price, category, active, image_url')
+                .eq('active', true)
+                .order('created_at', { ascending: false });
+            if (error) throw error;
+            return data;
+        });
+
+        coursesCache = data || [];
+        coursesCacheTimestamp = now;
+        console.log(`[SUPABASE] ${coursesCache.length} cursos cargados al cache`);
+        return coursesCache;
+    } catch (err) {
+        console.error('[SUPABASE] Error cargando cursos:', err.message);
+        return coursesCache || [];
+    }
+}
+
+/**
+ * Inicializa la escucha en tiempo real con auto-reconexion
  */
 function initRealtimeListener() {
-    supabase
+    const channel = supabase
         .channel('custom-courses-channel')
         .on(
             'postgres_changes',
             { event: '*', schema: 'public', table: 'courses' },
             (payload) => {
-                console.log('[SUPABASE] 🔄 Cambio detectado en tabla courses (Evento:', payload.eventType, '). Invalidando caché...');
-                invalidateCache();
+                console.log(`[SUPABASE] Cambio en courses (${payload.eventType}). Invalidando cache...`);
+                invalidateCoursesCache();
             }
         )
-        .subscribe();
-    console.log('[SUPABASE] 📡 Escucha en tiempo real activada para tabla courses.');
+        .subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+                console.log('[SUPABASE] Escucha en tiempo real activa para courses.');
+            }
+            if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+                console.warn('[SUPABASE] Realtime desconectado. Reintentando en 30s...');
+                setTimeout(() => {
+                    supabase.removeChannel(channel);
+                    initRealtimeListener();
+                }, 30000);
+            }
+        });
 }
 
 /**
- * Formatea los cursos para inyectar en el prompt de IA con el máximo nivel de detalle
+ * Formatea los cursos para inyectar en el prompt de IA
  */
 async function getCoursesForPrompt() {
     const courses = await getCourses();
@@ -72,43 +102,53 @@ async function getCoursesForPrompt() {
 
     return courses.map(c => {
         const price = c.price ? `$${Number(c.price).toLocaleString('es-CO')} COP` : 'Precio a consultar';
-        const type = c.category?.toLowerCase() === 'virtual' ? 'Modalidad: VIRTUAL' 
-                   : c.category?.toLowerCase() === 'presential' ? 'Modalidad: PRESENCIAL' 
-                   : `Categoría: ${c.category || 'General'}`;
-        
-        return `- **${c.title}** (${type})\n  Precio: ${price}\n  Detalle: ${c.description || 'Consulta para más detalles'}`;
+        const type = c.category?.toLowerCase() === 'virtual' ? 'Modalidad: VIRTUAL'
+                   : c.category?.toLowerCase() === 'presential' ? 'Modalidad: PRESENCIAL'
+                   : `Categoria: ${c.category || 'General'}`;
+
+        return `- **${c.title}** (${type})\n  Precio: ${price}\n  Detalle: ${c.description || 'Consulta para mas detalles'}`;
     }).join('\n\n');
 }
 
 /**
- * Obtiene la configuración del asistente IA
+ * Obtiene la configuracion del asistente IA (con cache de 5 min)
  */
 async function getAIConfig() {
-    try {
-        const { data, error } = await supabase
-            .from('whatsapp_ai_config')
-            .select('*')
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .single();
+    const now = Date.now();
+    if (aiConfigCache && (now - aiConfigCacheTimestamp) < AI_CONFIG_CACHE_TTL) {
+        return { ...aiConfigCache };
+    }
 
-        if (error || !data) {
-            // Configuración por defecto si no existe
-            return getDefaultConfig();
+    try {
+        const data = await withRetry(async () => {
+            const { data, error } = await supabase
+                .from('whatsapp_ai_config')
+                .select('*')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+            if (error) throw error;
+            return data;
+        });
+
+        if (data) {
+            aiConfigCache = data;
+            aiConfigCacheTimestamp = now;
+            return { ...data };
         }
-        return data;
+        return getDefaultConfig();
     } catch (err) {
         console.error('[SUPABASE] Error cargando config IA:', err.message);
+        if (aiConfigCache) return { ...aiConfigCache };
         return getDefaultConfig();
     }
 }
 
 /**
- * Guarda/actualiza la configuración del asistente IA
+ * Guarda/actualiza la configuracion del asistente IA
  */
 async function saveAIConfig(config) {
     try {
-        // Verificar si ya existe
         const { data: existing } = await supabase
             .from('whatsapp_ai_config')
             .select('id')
@@ -127,6 +167,11 @@ async function saveAIConfig(config) {
                 .insert([config]);
             if (error) throw error;
         }
+
+        // Invalidar cache de config
+        aiConfigCache = null;
+        aiConfigCacheTimestamp = 0;
+
         return { success: true };
     } catch (err) {
         console.error('[SUPABASE] Error guardando config IA:', err.message);
@@ -135,26 +180,26 @@ async function saveAIConfig(config) {
 }
 
 /**
- * Guarda un mensaje en el historial
+ * Guarda un mensaje en el historial (no critico, no bloquea el flujo)
  */
 async function saveMessage(chatId, phone, direction, message, aiGenerated = false) {
     try {
-        await supabase.from('whatsapp_messages').insert([{
+        const { error } = await supabase.from('whatsapp_messages').insert([{
             chat_id: chatId,
             phone,
             direction,
-            message: message?.substring(0, 4000), // Límite seguro
+            message: message?.substring(0, 4000),
             ai_generated: aiGenerated,
             created_at: new Date().toISOString()
         }]);
+        if (error) console.error('[SUPABASE] Error guardando mensaje:', error.message);
     } catch (err) {
-        // No crítico — no cortar el flujo por esto
         console.error('[SUPABASE] Error guardando mensaje:', err.message);
     }
 }
 
 /**
- * Obtiene historial de mensajes de un chat (últimos N)
+ * Obtiene historial de mensajes de un chat
  */
 async function getMessageHistory(chatId, limit = 50) {
     try {
@@ -174,14 +219,10 @@ async function getMessageHistory(chatId, limit = 50) {
 }
 
 /**
- * Obtiene los chats recientes agrupados desde el historial de la BD
- * Esto es necesario porque al reiniciar el servidor, Baileys no re-descarga chats antiguos.
+ * Obtiene los chats recientes desde la BD (para cuando el cache esta vacio)
  */
 async function getRecentChats(limit = 50) {
     try {
-        // En Supabase no hay GROUP BY nativo simple vía SDK sin RPC, así que ordenamos
-        // y agrupamos en memoria, o usamos una vista. Para hacerlo robusto y simple,
-        // traemos los últimos 500 mensajes y los agrupamos por chat_id.
         const { data: msgs, error } = await supabase
             .from('whatsapp_messages')
             .select('chat_id, phone, message, created_at, direction, ai_generated')
@@ -189,7 +230,7 @@ async function getRecentChats(limit = 50) {
             .limit(500);
 
         if (error) throw error;
-        
+
         const chats = new Map();
         for (const msg of (msgs || [])) {
             if (!chats.has(msg.chat_id)) {
@@ -198,30 +239,35 @@ async function getRecentChats(limit = 50) {
                 chats.set(msg.chat_id, {
                     jid: msg.chat_id,
                     phone: rawPhone,
-                    isLid: isLid,
+                    isLid,
                     lastMessage: msg.message,
                     lastTime: new Date(msg.created_at).getTime(),
                     direction: msg.direction,
-                    unreadCount: 0 // Si queremos podríamos calcularlo, pero dejémoslo en 0 para historicos
+                    unreadCount: 0
                 });
             }
         }
 
-        // Consultamos los nombres en el CRM para esos números
         const chatArray = Array.from(chats.values()).slice(0, limit);
         if (chatArray.length > 0) {
             const phones = chatArray.map(c => c.phone);
-            const { data: crmData } = await supabase
-                .from('whatsapp_crm')
-                .select('phone, name')
-                .in('phone', phones);
-                
-            if (crmData) {
-                const nameMap = new Map(crmData.map(c => [c.phone, c.name]));
-                chatArray.forEach(c => {
-                    c.name = nameMap.get(c.phone) || (c.isLid ? 'Contacto Anuncio' : c.phone);
-                });
-            } else {
+            try {
+                const { data: crmData } = await supabase
+                    .from('whatsapp_crm')
+                    .select('phone, name')
+                    .in('phone', phones);
+
+                if (crmData) {
+                    const nameMap = new Map(crmData.map(c => [c.phone, c.name]));
+                    chatArray.forEach(c => {
+                        c.name = nameMap.get(c.phone) || (c.isLid ? 'Contacto Anuncio' : c.phone);
+                    });
+                } else {
+                    chatArray.forEach(c => {
+                        if (!c.name) c.name = c.isLid ? 'Contacto Anuncio' : c.phone;
+                    });
+                }
+            } catch {
                 chatArray.forEach(c => {
                     if (!c.name) c.name = c.isLid ? 'Contacto Anuncio' : c.phone;
                 });
@@ -235,9 +281,6 @@ async function getRecentChats(limit = 50) {
     }
 }
 
-/**
- * Obtiene datos CRM de un contacto
- */
 async function getCRMContact(phone) {
     try {
         const { data } = await supabase
@@ -251,21 +294,20 @@ async function getCRMContact(phone) {
     }
 }
 
-/**
- * Actualiza datos CRM de un contacto
- */
 async function upsertCRMContact(phone, updates) {
     try {
         const existing = await getCRMContact(phone);
         if (existing) {
-            await supabase
+            const { error } = await supabase
                 .from('whatsapp_crm')
                 .update({ ...updates, updated_at: new Date().toISOString() })
                 .eq('phone', phone);
+            if (error) throw error;
         } else {
-            await supabase
+            const { error } = await supabase
                 .from('whatsapp_crm')
                 .insert([{ phone, ...updates, created_at: new Date().toISOString() }]);
+            if (error) throw error;
         }
     } catch (err) {
         console.error('[SUPABASE] Error en CRM upsert:', err.message);
@@ -277,19 +319,18 @@ function getDefaultConfig() {
         auto_reply: true,
         delay_min: 3,
         delay_max: 8,
-        tone: 'cálida y profesional',
-        system_prompt: null, // Se genera dinámicamente en ai-agent.js
-        openai_api_key: null, // Usa variable de entorno si es null
+        tone: 'calida y profesional',
+        system_prompt: null,
+        openai_api_key: null,
         openai_model: 'gpt-4o',
         max_tokens: 300,
         temperature: 0.85
     };
 }
 
-// Invalida caché cuando se actualiza un curso
-function invalidateCache() {
+function invalidateCoursesCache() {
     coursesCache = null;
-    cacheTimestamp = 0;
+    coursesCacheTimestamp = 0;
 }
 
 module.exports = {
@@ -303,6 +344,6 @@ module.exports = {
     getRecentChats,
     getCRMContact,
     upsertCRMContact,
-    invalidateCache,
+    invalidateCache: invalidateCoursesCache,
     initRealtimeListener
 };

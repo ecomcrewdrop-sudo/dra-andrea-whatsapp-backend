@@ -1,49 +1,64 @@
 /**
  * ============================================================
- * CRM SERVICE — Sistema de clasificación automática
- * Clasifica leads automáticamente según interacción
+ * CRM SERVICE v3 — Sistema de clasificacion automatica
+ * Con deteccion de intencion mejorada y extraccion de nombres robusta
  * ============================================================
  */
 const { getCRMContact, upsertCRMContact } = require('./supabase-sync');
 
-// Palabras clave por nivel de intención
 const INTENT_KEYWORDS = {
-    CALIENTE: ['precio', 'cuánto', 'cuanto', 'costo', 'pagar', 'inscribir', 'inscripción', 'comprar', 'quiero', 'necesito', 'cuándo empieza', 'cuando empieza', 'disponible', 'inscribirme'],
-    INTERESADO: ['información', 'informacion', 'saber', 'cuéntame', 'cuénteme', 'cuentame', 'conocer', 'qué incluye', 'que incluye', 'detalles', 'módulos', 'contenido', 'duración', 'duracion'],
-    NUEVO: [] // Cualquier primer contacto
+    CALIENTE: [
+        'precio', 'cuanto', 'cuánto', 'costo', 'valor',
+        'pagar', 'pago', 'inscribir', 'inscripción', 'inscripcion',
+        'comprar', 'quiero', 'necesito', 'matricul',
+        'cuándo empieza', 'cuando empieza', 'cuando inicia', 'cuándo inicia',
+        'disponible', 'inscribirme', 'registrarme', 'registrar',
+        'link de pago', 'donde pago', 'dónde pago', 'como pago', 'cómo pago',
+        'transferencia', 'nequi', 'daviplata', 'bancolombia',
+        'tarjeta', 'cuotas', 'financiar', 'descuento', 'promocion', 'promoción',
+        'quiero el curso', 'me interesa el curso', 'quiero inscribirme',
+        'como me inscribo', 'cómo me inscribo', 'como accedo', 'cómo accedo'
+    ],
+    INTERESADO: [
+        'información', 'informacion', 'info',
+        'saber', 'cuéntame', 'cuénteme', 'cuentame', 'cuenteme',
+        'conocer', 'qué incluye', 'que incluye',
+        'detalles', 'módulos', 'modulos', 'contenido',
+        'duración', 'duracion', 'cuanto dura', 'cuánto dura',
+        'temario', 'programa', 'pensum', 'plan de estudios',
+        'certificado', 'certificacion', 'certificación', 'diploma',
+        'horario', 'horarios', 'presencial', 'virtual', 'online',
+        'materiales', 'requisitos', 'experiencia necesaria',
+        'quién dicta', 'quien dicta', 'profesora', 'instructora'
+    ],
+    NUEVO: []
 };
 
-// Niveles en orden ascendente
 const LEVELS = ['NUEVO', 'INTERESADO', 'CALIENTE', 'CLIENTE'];
 
-/**
- * Analiza un mensaje y determina el nivel de intención
- */
 function detectIntent(message) {
-    const lower = message.toLowerCase();
+    const lower = message.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     for (const level of ['CALIENTE', 'INTERESADO']) {
-        if (INTENT_KEYWORDS[level].some(kw => lower.includes(kw))) {
-            return level;
-        }
+        const found = INTENT_KEYWORDS[level].some(kw => {
+            const normalizedKw = kw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            return lower.includes(normalizedKw);
+        });
+        if (found) return level;
     }
     return null;
 }
 
-/**
- * Actualiza el nivel CRM de un contacto (nunca baja de nivel)
- */
 async function updateCRMLevel(phone, incomingMessage, detectedName = null) {
     try {
         let crm = await getCRMContact(phone);
         const currentLevelIdx = LEVELS.indexOf(crm?.label || 'NUEVO');
-        
+
         const detectedIntent = detectIntent(incomingMessage);
         const newLevelIdx = detectedIntent ? LEVELS.indexOf(detectedIntent) : currentLevelIdx;
-        
-        // Solo sube de nivel, nunca baja
+
         const finalLevelIdx = Math.max(currentLevelIdx, newLevelIdx);
         const finalLabel = LEVELS[finalLevelIdx];
-        
+
         const updates = {
             label: finalLabel,
             interest_level: Math.min(finalLevelIdx + 1, 5),
@@ -51,16 +66,15 @@ async function updateCRMLevel(phone, incomingMessage, detectedName = null) {
             conversation_count: (crm?.conversation_count || 0) + 1
         };
 
-        // Actualiza nombre si lo detectamos y no lo teníamos
         if (detectedName && (!crm?.name || crm.name === crm?.phone)) {
             updates.name = detectedName;
         }
 
         await upsertCRMContact(phone, updates);
-        
+
         const levelChanged = finalLabel !== (crm?.label || 'NUEVO');
         if (levelChanged) {
-            console.log(`[CRM] 📈 ${phone} subió a nivel: ${finalLabel}`);
+            console.log(`[CRM] ${phone} subio a nivel: ${finalLabel}`);
         }
 
         return { ...crm, ...updates };
@@ -70,21 +84,15 @@ async function updateCRMLevel(phone, incomingMessage, detectedName = null) {
     }
 }
 
-/**
- * Marca un contacto como CLIENTE cuando se inscribe a un curso
- */
 async function markAsClient(phone) {
     await upsertCRMContact(phone, {
         label: 'CLIENTE',
         interest_level: 5,
         last_interaction: new Date().toISOString()
     });
-    console.log(`[CRM] 🏆 ${phone} marcado como CLIENTE`);
+    console.log(`[CRM] ${phone} marcado como CLIENTE`);
 }
 
-/**
- * Agrega una nota manual al CRM de un contacto
- */
 async function addNote(phone, note) {
     try {
         const crm = await getCRMContact(phone);
@@ -92,7 +100,7 @@ async function addNote(phone, note) {
         const timestamp = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
         const newNote = `[${timestamp}]: ${note}`;
         const updatedNotes = existingNotes ? `${existingNotes}\n${newNote}` : newNote;
-        
+
         await upsertCRMContact(phone, { notes: updatedNotes });
         return { success: true };
     } catch (err) {
@@ -100,19 +108,18 @@ async function addNote(phone, note) {
     }
 }
 
-/**
- * Intenta extraer el nombre de un mensaje de presentación
- * Ej: "Hola, soy María" → "María"
- */
 function extractNameFromMessage(message) {
     const patterns = [
         /(?:soy|me llamo|mi nombre es|soy la|soy el)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?)/i,
-        /^([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)[\s,!]+(?:hola|buenas|buenos|buen)/i
+        /^([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)[\s,!]+(?:hola|buenas|buenos|buen)/i,
+        /(?:hola|buenas|buenos|buen\w*)[,!.\s]+(?:soy|me llamo)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)/i,
+        /(?:hola|buenas)[,!\s]+(?:mi nombre es|me llamo)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?)/i,
+        /(?:habla|escribe|te escribe)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)/i,
     ];
-    
+
     for (const pattern of patterns) {
         const match = message.match(pattern);
-        if (match && match[1]) return match[1].trim();
+        if (match && match[1] && match[1].length >= 2) return match[1].trim();
     }
     return null;
 }

@@ -1,8 +1,7 @@
 /**
  * ============================================================
- * WHATSAPP MANAGER — Gestor de conexión Baileys
- * Conexión estable, anticaídas, anti-ban
- * Maneja QR, mensajes, presencias y reconexión automática
+ * WHATSAPP MANAGER v3 — Gestor de conexion Baileys
+ * Robusto, anti-caidas, anti-ban, auto-recuperable
  * ============================================================
  */
 require('dotenv').config();
@@ -17,15 +16,12 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const QRCode = require('qrcode');
-const { generateResponse } = require('./ai-agent');
+const { generateResponse, generateFollowUp } = require('./ai-agent');
 const { MessageQueue, sleep } = require('./message-queue');
 const { updateCRMLevel, extractNameFromMessage } = require('./crm-service');
 const { getAIConfig, getCoursesForPrompt, saveMessage, getCRMContact, getRecentChats } = require('./supabase-sync');
 
-// Directorio persistente para la sesión
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_session');
-
-// Logger silencioso (evita spam de logs de Baileys)
 const logger = pino({ level: 'silent' });
 
 class WhatsAppManager {
@@ -39,22 +35,81 @@ class WhatsAppManager {
         this.MAX_RETRIES = 15;
         this.retryDelay = 3000;
         this.reconnectTimer = null;
-
-        // Chats con IA desactivada manualmente
         this.aiDisabledChats = new Set();
-
-        // Cache simple de chats en memoria { jid: chatData }
         this.chatsCache = new Map();
-
-        // Timers de seguimiento proactivo { jid: timeoutId }
         this.followUpTimers = new Map();
-
-        // Cache de nombres de contactos { jid: name }
         this.contactNames = new Map();
 
-        // Asegurar que el directorio de sesión exista
+        // Deduplicacion: guarda IDs de mensajes recientes para evitar procesarlos dos veces
+        this.processedMessages = new Set();
+        this.DEDUP_MAX = 500;
+
+        // Watchdog: detecta conexiones muertas silenciosamente
+        this.watchdogTimer = null;
+        this.lastMessageTime = Date.now();
+        this.WATCHDOG_INTERVAL = 5 * 60 * 1000; // revisar cada 5 min
+        this.WATCHDOG_TIMEOUT = 15 * 60 * 1000; // 15 min sin actividad = sospechoso
+
+        // Flag para evitar reconexiones concurrentes
+        this._connecting = false;
+
         if (!fs.existsSync(AUTH_DIR)) {
             fs.mkdirSync(AUTH_DIR, { recursive: true });
+        }
+
+        this.startWatchdog();
+    }
+
+    /**
+     * Watchdog: si pasan 15 min sin ningun mensaje y estamos "conectados",
+     * fuerza una reconexion preventiva
+     */
+    startWatchdog() {
+        if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+
+        this.watchdogTimer = setInterval(() => {
+            if (!this.isConnected) return;
+
+            const silentTime = Date.now() - this.lastMessageTime;
+            if (silentTime > this.WATCHDOG_TIMEOUT) {
+                console.log(`[WA] WATCHDOG: ${Math.round(silentTime / 60000)} min sin actividad. Verificando conexion...`);
+                this.healthCheck();
+            }
+        }, this.WATCHDOG_INTERVAL);
+    }
+
+    async healthCheck() {
+        if (!this.sock || !this.isConnected) return;
+
+        try {
+            // Intentar una operacion liviana para verificar que la conexion esta viva
+            await Promise.race([
+                this.sock.sendPresenceUpdate('available'),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000))
+            ]);
+            console.log('[WA] WATCHDOG: Conexion verificada OK');
+        } catch (err) {
+            console.error('[WA] WATCHDOG: Conexion muerta detectada. Reconectando...');
+            this.isConnected = false;
+            this.io.emit('wa:disconnected', {
+                status: 'disconnected',
+                message: 'Conexion perdida detectada. Reconectando...'
+            });
+            this.cleanupSocket();
+            this.scheduleReconnect();
+        }
+    }
+
+    /**
+     * Limpia el socket actual antes de crear uno nuevo (evita event handler leaks)
+     */
+    cleanupSocket() {
+        if (this.sock) {
+            try {
+                this.sock.ev.removeAllListeners();
+                this.sock.end(new Error('cleanup'));
+            } catch {}
+            this.sock = null;
         }
     }
 
@@ -62,14 +117,23 @@ class WhatsAppManager {
      * Inicializa y conecta WhatsApp
      */
     async connect() {
-        console.log('[WA] 🔌 Iniciando conexión WhatsApp...');
+        // Evitar reconexiones concurrentes
+        if (this._connecting) {
+            console.log('[WA] Ya hay una conexion en progreso. Ignorando.');
+            return;
+        }
+        this._connecting = true;
+
+        console.log('[WA] Iniciando conexion WhatsApp...');
 
         try {
+            // Limpiar socket anterior para evitar acumulacion de event handlers
+            this.cleanupSocket();
+
             const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
             const { version } = await fetchLatestBaileysVersion();
-            console.log(`[WA] 📱 Usando WhatsApp Web v${version.join('.')}`);
+            console.log(`[WA] Usando WhatsApp Web v${version.join('.')}`);
 
-            // Crear socket de WhatsApp con configuración anti-ban
             this.sock = makeWASocket({
                 version,
                 logger,
@@ -79,38 +143,35 @@ class WhatsAppManager {
                 markOnlineOnConnect: true,
                 generateHighQualityLinkPreview: false,
                 browser: ['Andrea Vargas', 'Chrome', '124.0.6367.60'],
-                getMessage: async () => ({ conversation: '' })
+                getMessage: async () => ({ conversation: '' }),
+                keepAliveIntervalMs: 30000,
+                retryRequestDelayMs: 2000,
             });
 
-            // === HANDLERS DE EVENTOS ===
             this.setupEventHandlers(saveCreds);
 
         } catch (err) {
-            console.error('[WA] ❌ Error crítico iniciando:', err.message);
+            console.error('[WA] Error critico iniciando:', err.message);
             this.scheduleReconnect();
+        } finally {
+            this._connecting = false;
         }
     }
 
-    /**
-     * Configura todos los handlers de eventos de Baileys
-     */
     setupEventHandlers(saveCreds) {
         const { sock, io } = this;
+        if (!sock) return;
 
-        // ── CREDENCIALES ─────────────────────────────────────────
         sock.ev.on('creds.update', saveCreds);
 
-        // ── ESTADO DE CONEXIÓN ───────────────────────────────────
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
-            // QR Code generado — enviar al frontend
             if (qr) {
-                console.log('[WA] 📲 QR generado. Esperando escaneo...');
+                console.log('[WA] QR generado. Esperando escaneo...');
                 try {
                     const qrDataUrl = await QRCode.toDataURL(qr, {
-                        width: 300,
-                        margin: 2,
+                        width: 300, margin: 2,
                         color: { dark: '#000000', light: '#FFFFFF' }
                     });
                     this.currentQR = qrDataUrl;
@@ -121,46 +182,46 @@ class WhatsAppManager {
                 }
             }
 
-            // Conexión abierta exitosamente
             if (connection === 'open') {
-                console.log('[WA] ✅ ¡WhatsApp conectado!');
+                console.log('[WA] WhatsApp conectado!');
                 this.isConnected = true;
                 this.retryCount = 0;
                 this.retryDelay = 3000;
                 this.currentQR = null;
+                this.lastMessageTime = Date.now();
 
-                // Si no hay chats en caché (por ejemplo, tras un reinicio del servidor),
-                // cargamos los recientes desde Supabase para poblar la lista
                 if (this.chatsCache.size === 0) {
-                    console.log('[WA] 🔄 Caché de chats vacío. Cargando desde BD...');
-                    getRecentChats(50).then(chats => {
+                    console.log('[WA] Cache de chats vacio. Cargando desde BD...');
+                    try {
+                        const chats = await getRecentChats(50);
                         if (chats && chats.length > 0) {
                             chats.forEach(chat => this.chatsCache.set(chat.jid, chat));
-                            this.io.emit('wa:chats_loaded', { chats });
-                            console.log(`[WA] 📋 ${chats.length} chats recuperados de la BD`);
+                            io.emit('wa:chats_loaded', { chats });
+                            console.log(`[WA] ${chats.length} chats recuperados de la BD`);
                         }
-                    }).catch(err => console.error('Error cargando chats BD:', err));
+                    } catch (err) {
+                        console.error('Error cargando chats BD:', err.message);
+                    }
                 }
 
                 io.emit('wa:connected', {
                     status: 'connected',
-                    message: '¡WhatsApp conectado exitosamente!',
+                    message: 'WhatsApp conectado exitosamente!',
                     timestamp: new Date().toISOString()
                 });
             }
 
-            // Conexión cerrada
             if (connection === 'close') {
                 this.isConnected = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-                console.log(`[WA] ⚠️ Conexión cerrada. Código: ${statusCode}. Reconectar: ${shouldReconnect}`);
+                console.log(`[WA] Conexion cerrada. Codigo: ${statusCode}. Reconectar: ${shouldReconnect}`);
 
                 io.emit('wa:disconnected', {
                     status: 'disconnected',
                     code: statusCode,
-                    message: shouldReconnect ? 'Reconectando...' : 'Sesión cerrada. Escanea QR nuevamente.'
+                    message: shouldReconnect ? 'Reconectando...' : 'Sesion cerrada. Escanea QR nuevamente.'
                 });
 
                 if (shouldReconnect) {
@@ -171,23 +232,23 @@ class WhatsAppManager {
             }
         });
 
-        // ── MENSAJES ENTRANTES ───────────────────────────────────
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             if (type !== 'notify') return;
             for (const msg of messages) {
-                await this.handleIncomingMessage(msg);
+                try {
+                    await this.handleIncomingMessage(msg);
+                } catch (err) {
+                    console.error('[WA] Error no capturado en handleIncomingMessage:', err.message);
+                }
             }
         });
 
-        // ── CHATS (para mantener la lista actualizada) ────────────
         sock.ev.on('chats.upsert', chats => this.updateChatsCache(chats));
         sock.ev.on('chats.set', ({ chats }) => this.updateChatsCache(chats));
         sock.ev.on('chats.update', chats => this.updateChatsCache(chats));
 
-        // Evento de historial inicial
-        sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }) => {
-            console.log(`[WA] 📥 Recibido historial de sincronización: ${chats.length} chats`);
-            
+        sock.ev.on('messaging-history.set', ({ chats, contacts }) => {
+            console.log(`[WA] Recibido historial: ${chats.length} chats`);
             if (contacts) {
                 contacts.forEach(contact => {
                     if (contact.name || contact.pushname) {
@@ -195,11 +256,9 @@ class WhatsAppManager {
                     }
                 });
             }
-            
             this.updateChatsCache(chats);
         });
 
-        // ── CONTACTOS ────────────────────────────────────────────
         sock.ev.on('contacts.upsert', (contacts) => {
             contacts.forEach(contact => {
                 if (contact.name || contact.pushname) {
@@ -208,11 +267,10 @@ class WhatsAppManager {
             });
         });
 
-        // ── PRESENCIA (quién está escribiendo) ───────────────────
         sock.ev.on('presence.update', ({ id, presences }) => {
             const presenceData = presences[id] || {};
-            io.emit('wa:presence', { 
-                jid: id, 
+            io.emit('wa:presence', {
+                jid: id,
                 presences,
                 status: presenceData.lastKnownPresence,
                 lastSeen: presenceData.lastSeen ? new Date(presenceData.lastSeen * 1000).toISOString() : null,
@@ -221,12 +279,9 @@ class WhatsAppManager {
         });
     }
 
-    /**
-     * Actualiza el cache de chats y emite al frontend
-     */
     updateChatsCache(chats) {
         if (!chats || !Array.isArray(chats)) return;
-        
+
         chats.forEach(chat => {
             if (!isJidGroup(chat.id)) {
                 const isLid = chat.id.includes('@lid');
@@ -234,7 +289,7 @@ class WhatsAppManager {
                 this.chatsCache.set(chat.id, {
                     jid: chat.id,
                     phone: rawPhone,
-                    isLid: isLid,
+                    isLid,
                     name: chat.name || this.contactNames.get(chat.id) || (isLid ? 'Contacto Anuncio' : rawPhone),
                     unreadCount: chat.unreadCount || 0,
                     lastTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now()
@@ -250,20 +305,28 @@ class WhatsAppManager {
     }
 
     /**
-     * Maneja un mensaje entrante
+     * Maneja un mensaje entrante con deduplicacion y proteccion total
      */
     async handleIncomingMessage(msg) {
-        const { io, sock, queue } = this;
+        const { io } = this;
 
-        // Filtros: ignorar mensajes propios, de grupos, vacíos, o del sistema
         if (msg.key.fromMe) return;
         if (isJidGroup(msg.key.remoteJid)) return;
         if (msg.key.remoteJid === 'status@broadcast') return;
         if (!msg.message) return;
 
+        // DEDUPLICACION: evitar procesar el mismo mensaje dos veces
+        const msgId = msg.key.id;
+        if (this.processedMessages.has(msgId)) return;
+        this.processedMessages.add(msgId);
+        if (this.processedMessages.size > this.DEDUP_MAX) {
+            const first = this.processedMessages.values().next().value;
+            this.processedMessages.delete(first);
+        }
+
         const jid = msg.key.remoteJid;
 
-        // Cancelar timer de seguimiento si el usuario volvió a escribir
+        // Cancelar timer de seguimiento si el usuario volvio a escribir
         if (this.followUpTimers.has(jid)) {
             clearTimeout(this.followUpTimers.get(jid));
             this.followUpTimers.delete(jid);
@@ -272,107 +335,138 @@ class WhatsAppManager {
         const isLid = jid.includes('@lid');
         const phone = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
 
-        // Extraer texto del mensaje
         const text = this.extractMessageText(msg);
         if (!text || text.trim().length === 0) return;
 
-        // Nombre del contacto
         const senderName = msg.pushName || this.contactNames.get(jid) || (isLid ? 'Contacto Anuncio' : phone);
         if (msg.pushName) this.contactNames.set(jid, msg.pushName);
 
-        console.log(`[WA] 📩 Mensaje de ${senderName} (${isLid ? 'LID' : phone}): "${text.substring(0, 60)}"`);
+        // Actualizar timestamp del watchdog
+        this.lastMessageTime = Date.now();
 
-        // Actualizar cache de chats
+        console.log(`[WA] Mensaje de ${senderName} (${isLid ? 'LID' : phone}): "${text.substring(0, 60)}"`);
+
         this.chatsCache.set(jid, {
-            jid,
-            phone,
-            isLid,
+            jid, phone, isLid,
             name: senderName,
             lastMessage: text.substring(0, 60),
             lastTime: Date.now()
         });
 
-        // Simular lectura (anti-ban) y suscribir a presencia
-        try { 
-            await sock.readMessages([msg.key]); 
-            await sock.presenceSubscribe(jid);
-        } catch {}
+        // Simular lectura (anti-ban)
+        await this.safeSockCall(async () => {
+            await this.sock.readMessages([msg.key]);
+            await this.sock.presenceSubscribe(jid);
+        });
 
-        // Guardar en historial
         await saveMessage(jid, phone, 'incoming', text, false);
 
-        // Actualizar CRM
         const detectedName = extractNameFromMessage(text);
         const crmUpdate = await updateCRMLevel(phone, text, detectedName || senderName);
 
-        // Emitir al frontend en tiempo real
         io.emit('wa:message', {
-            jid,
-            phone,
+            jid, phone,
             name: senderName,
             text,
             direction: 'incoming',
             timestamp: msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now(),
-            messageId: msg.key.id,
+            messageId: msgId,
             crm: crmUpdate
         });
 
-        // ¿IA activa para este chat?
-        const config = await getAIConfig();
-        if (!config.auto_reply || this.aiDisabledChats.has(jid)) {
-            console.log(`[WA] 🔕 IA desactivada para ${phone}.`);
+        // IA activa para este chat?
+        let config;
+        try {
+            config = await getAIConfig();
+        } catch (err) {
+            console.error('[WA] Error obteniendo config IA:', err.message);
             return;
         }
 
-        // Encolar respuesta IA con delays humanizados
-        queue.enqueue(jid, async () => {
+        if (!config.auto_reply || this.aiDisabledChats.has(jid)) {
+            console.log(`[WA] IA desactivada para ${phone}.`);
+            return;
+        }
+
+        this.queue.enqueue(jid, async () => {
             await this.sendAIResponse(jid, phone, text, senderName, config);
         });
 
-        // Programar seguimiento proactivo según nivel CRM
         if (crmUpdate && config.auto_reply && !this.aiDisabledChats.has(jid)) {
             this.scheduleFollowUp(jid, phone, crmUpdate.label, senderName);
         }
     }
 
     /**
-     * Genera y envía respuesta de IA con comportamiento humano
+     * Ejecuta una operacion sobre sock de forma segura (null-check + try/catch)
+     */
+    async safeSockCall(fn) {
+        if (!this.sock || !this.isConnected) return;
+        try {
+            await fn();
+        } catch (err) {
+            if (err.message?.includes('Connection Closed') || err.message?.includes('not open')) {
+                console.warn('[WA] Conexion cerrada durante operacion. Marcando desconectado.');
+                this.isConnected = false;
+            }
+        }
+    }
+
+    /**
+     * Genera y envia respuesta de IA con proteccion completa contra caidas
      */
     async sendAIResponse(jid, phone, incomingText, senderName, config) {
-        const { sock, io } = this;
+        const { io } = this;
 
         try {
-            // 1. Presencia "available" primero
-            await sock.sendPresenceUpdate('available', jid);
+            // 1. Presencia "available"
+            await this.safeSockCall(() => this.sock.sendPresenceUpdate('available', jid));
 
-            // 2. Delay inicial: simula leer el mensaje (1-3 seg)
+            // 2. Delay de lectura
             const readDelay = 1000 + Math.random() * 2000;
             await sleep(readDelay);
 
-            // 3. Generar respuesta con GPT-4o (paralelo al typing)
+            // 3. Generar respuesta con timeout de seguridad
             const responsePromise = generateResponse(jid, incomingText, senderName);
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('OpenAI timeout (45s)')), 45000)
+            );
 
-            // 4. Mostrar "escribiendo..." mientras genera
-            await sock.sendPresenceUpdate('composing', jid);
+            // 4. Mostrar "escribiendo..."
+            await this.safeSockCall(() => this.sock.sendPresenceUpdate('composing', jid));
 
-            const responseText = await responsePromise;
+            let responseText;
+            try {
+                responseText = await Promise.race([responsePromise, timeoutPromise]);
+            } catch (aiErr) {
+                console.error(`[WA] Error/timeout generando respuesta IA: ${aiErr.message}`);
+                responseText = 'Hola! Disculpa, en este momento estoy un poco ocupada. Te respondo en unos minutos!';
+            }
 
-            // 5. Delay de escritura basado en longitud de la respuesta
+            if (!responseText || responseText.trim().length === 0) {
+                console.warn('[WA] Respuesta IA vacia. Omitiendo envio.');
+                return;
+            }
+
+            // 5. Delay de escritura
             const typingDelay = MessageQueue.humanTypingDelay(responseText);
             await sleep(typingDelay);
 
-            // 6. Enviar mensaje
-            await sock.sendMessage(jid, { text: responseText });
-            await sock.sendPresenceUpdate('available', jid);
+            // 6. Verificar conexion antes de enviar
+            if (!this.sock || !this.isConnected) {
+                console.warn('[WA] Conexion perdida antes de enviar respuesta IA.');
+                return;
+            }
 
-            console.log(`[WA] ✅ Respuesta IA enviada a ${phone}`);
+            await this.sock.sendMessage(jid, { text: responseText });
+            await this.safeSockCall(() => this.sock.sendPresenceUpdate('available', jid));
 
-            // 7. Guardar y emitir al frontend
+            console.log(`[WA] Respuesta IA enviada a ${phone}`);
+
             await saveMessage(jid, phone, 'outgoing', responseText, true);
 
             io.emit('wa:message', {
-                jid,
-                phone,
+                jid, phone,
                 name: 'Andrea (IA)',
                 text: responseText,
                 direction: 'outgoing',
@@ -381,33 +475,40 @@ class WhatsAppManager {
             });
 
         } catch (err) {
-            console.error(`[WA] ❌ Error enviando respuesta IA a ${phone}:`, err.message);
-            await sock.sendPresenceUpdate('available', jid).catch(() => {});
+            console.error(`[WA] Error enviando respuesta IA a ${phone}:`, err.message);
+            await this.safeSockCall(() => this.sock.sendPresenceUpdate('available', jid));
         }
     }
 
     /**
-     * Programa un mensaje de seguimiento proactivo si el usuario no responde
+     * Programa seguimiento proactivo con proteccion
      */
     scheduleFollowUp(jid, phone, crmLevel, senderName) {
         const delays = { CALIENTE: 90 * 60 * 1000, INTERESADO: 4 * 60 * 60 * 1000 };
         const delay = delays[crmLevel];
         if (!delay) return;
 
-        // Cancelar timer previo
         if (this.followUpTimers.has(jid)) clearTimeout(this.followUpTimers.get(jid));
 
         const timer = setTimeout(async () => {
-            if (!this.isConnected) return;
             this.followUpTimers.delete(jid);
-            
+            if (!this.isConnected || !this.sock) return;
+            if (this.aiDisabledChats.has(jid)) return;
+
             try {
-                const { generateFollowUp } = require('./ai-agent');
                 const followUpText = await generateFollowUp(jid, crmLevel, senderName);
-                if (!followUpText) return;
+                if (!followUpText || followUpText.trim().length === 0) return;
+
+                // Humanizar el follow-up tambien
+                await this.safeSockCall(() => this.sock.sendPresenceUpdate('composing', jid));
+                const typingDelay = MessageQueue.humanTypingDelay(followUpText);
+                await sleep(typingDelay);
+
+                if (!this.sock || !this.isConnected) return;
 
                 await this.sock.sendMessage(jid, { text: followUpText });
-                const { saveMessage } = require('./supabase-sync');
+                await this.safeSockCall(() => this.sock.sendPresenceUpdate('available', jid));
+
                 await saveMessage(jid, phone, 'outgoing', followUpText, true);
 
                 this.io.emit('wa:message', {
@@ -418,7 +519,7 @@ class WhatsAppManager {
                     ai_generated: true,
                     timestamp: Date.now()
                 });
-                console.log(`[WA] 📨 Follow-up proactivo enviado a ${phone} (nivel ${crmLevel})`);
+                console.log(`[WA] Follow-up enviado a ${phone} (nivel ${crmLevel})`);
             } catch (err) {
                 console.error('[WA] Error enviando follow-up:', err.message);
             }
@@ -427,22 +528,18 @@ class WhatsAppManager {
         this.followUpTimers.set(jid, timer);
     }
 
-    /**
-     * Envía un mensaje manual (desde el panel admin)
-     */
     async sendManualMessage(jid, text) {
         if (!this.isConnected || !this.sock) {
-            return { success: false, error: 'WhatsApp no está conectado' };
+            return { success: false, error: 'WhatsApp no esta conectado' };
         }
 
         try {
             await this.sock.sendMessage(jid, { text });
-            const phone = jid.replace('@s.whatsapp.net', '');
+            const phone = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
             await saveMessage(jid, phone, 'outgoing', text, false);
 
             this.io.emit('wa:message', {
-                jid,
-                phone,
+                jid, phone,
                 name: 'Andrea (Manual)',
                 text,
                 direction: 'outgoing',
@@ -457,21 +554,20 @@ class WhatsAppManager {
         }
     }
 
-    /**
-     * Activa/desactiva la IA para un chat específico
-     */
     toggleAI(jid, enabled) {
         if (enabled) {
             this.aiDisabledChats.delete(jid);
         } else {
             this.aiDisabledChats.add(jid);
+            // Cancelar follow-up pendiente si se desactiva IA
+            if (this.followUpTimers.has(jid)) {
+                clearTimeout(this.followUpTimers.get(jid));
+                this.followUpTimers.delete(jid);
+            }
         }
         console.log(`[WA] IA ${enabled ? 'activada' : 'desactivada'} para ${jid}`);
     }
 
-    /**
-     * Extrae texto de cualquier tipo de mensaje WhatsApp
-     */
     extractMessageText(msg) {
         const m = msg.message;
         if (!m) return '';
@@ -487,53 +583,61 @@ class WhatsAppManager {
                '';
     }
 
-    /**
-     * Programa reconexión con backoff exponencial
-     */
     scheduleReconnect() {
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        if (this._connecting) return;
+
         if (this.retryCount >= this.MAX_RETRIES) {
-            console.error('[WA] ❌ Máximo de reintentos alcanzado.');
-            this.io.emit('wa:error', { message: 'No se pudo reconectar. Recarga la página y escanea el QR.' });
+            console.error(`[WA] Maximo de reintentos (${this.MAX_RETRIES}) alcanzado. Esperando 10 min antes de reiniciar ciclo...`);
+            this.io.emit('wa:error', { message: 'Reconexion fallida. Reintentando en 10 minutos...' });
+
+            // En vez de morir para siempre, reiniciar el ciclo despues de 10 min
+            this.reconnectTimer = setTimeout(() => {
+                console.log('[WA] Reiniciando ciclo de reconexion...');
+                this.retryCount = 0;
+                this.retryDelay = 3000;
+                this.connect();
+            }, 10 * 60 * 1000);
             return;
         }
 
         this.retryCount++;
         const delay = Math.min(this.retryDelay * Math.pow(1.5, this.retryCount - 1), 60000);
-        console.log(`[WA] 🔄 Reintento ${this.retryCount}/${this.MAX_RETRIES} en ${Math.round(delay/1000)}s...`);
+        console.log(`[WA] Reintento ${this.retryCount}/${this.MAX_RETRIES} en ${Math.round(delay / 1000)}s...`);
 
         this.reconnectTimer = setTimeout(() => {
             this.connect();
         }, delay);
     }
 
-    /**
-     * Limpia la sesión guardada (para pedir QR nuevo)
-     */
     clearSession() {
         try {
+            this.cleanupSocket();
             if (fs.existsSync(AUTH_DIR)) {
                 fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                 fs.mkdirSync(AUTH_DIR, { recursive: true });
             }
             this.isConnected = false;
             this.retryCount = 0;
-            console.log('[WA] 🗑️ Sesión eliminada. Listo para nuevo QR.');
-            this.io.emit('wa:session_cleared', { message: 'Sesión cerrada. Escanea el QR para reconectar.' });
+            this._connecting = false;
+            console.log('[WA] Sesion eliminada. Listo para nuevo QR.');
+            this.io.emit('wa:session_cleared', { message: 'Sesion cerrada. Escanea el QR para reconectar.' });
         } catch (err) {
-            console.error('[WA] Error limpiando sesión:', err.message);
+            console.error('[WA] Error limpiando sesion:', err.message);
         }
     }
 
-    /**
-     * Cierra la conexión limpiamente
-     */
     async disconnect() {
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-        if (this.sock) {
-            await this.sock.logout().catch(() => {});
-            this.sock = null;
+        if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+
+        // Cancelar todos los follow-ups
+        for (const timer of this.followUpTimers.values()) {
+            clearTimeout(timer);
         }
+        this.followUpTimers.clear();
+
+        this.cleanupSocket();
         this.isConnected = false;
     }
 
@@ -542,7 +646,10 @@ class WhatsAppManager {
             connected: this.isConnected,
             hasQR: !!this.currentQR,
             qr: this.currentQR,
-            retryCount: this.retryCount
+            retryCount: this.retryCount,
+            uptime: Math.floor(process.uptime()),
+            chatsCount: this.chatsCache.size,
+            activeFollowUps: this.followUpTimers.size
         };
     }
 }
