@@ -1,49 +1,97 @@
 /**
  * ============================================================
- * CRM SERVICE v3 — Sistema de clasificacion automatica
- * Con deteccion de intencion mejorada y extraccion de nombres robusta
+ * CRM SERVICE v4 — Clasificacion inteligente de leads
+ * Deteccion de intencion, objeciones, urgencia, saludos
  * ============================================================
  */
 const { getCRMContact, upsertCRMContact } = require('./supabase-sync');
 
+// ── KEYWORDS POR NIVEL DE INTENCION ──────────────────────────
 const INTENT_KEYWORDS = {
     CALIENTE: [
-        'precio', 'cuanto', 'cuánto', 'costo', 'valor',
-        'pagar', 'pago', 'inscribir', 'inscripción', 'inscripcion',
-        'comprar', 'quiero', 'necesito', 'matricul',
-        'cuándo empieza', 'cuando empieza', 'cuando inicia', 'cuándo inicia',
-        'disponible', 'inscribirme', 'registrarme', 'registrar',
+        // Precio y dinero
+        'precio', 'cuanto', 'cuánto', 'costo', 'valor', 'cuanto vale', 'cuánto vale',
+        'cuanto cuesta', 'cuánto cuesta', 'que precio', 'qué precio',
+        // Pago y metodos
+        'pagar', 'pago', 'transferencia', 'nequi', 'daviplata', 'bancolombia',
+        'tarjeta', 'cuotas', 'financiar', 'financiacion', 'financiación',
         'link de pago', 'donde pago', 'dónde pago', 'como pago', 'cómo pago',
-        'transferencia', 'nequi', 'daviplata', 'bancolombia',
-        'tarjeta', 'cuotas', 'financiar', 'descuento', 'promocion', 'promoción',
+        // Inscripcion
+        'inscribir', 'inscripción', 'inscripcion', 'inscribirme',
+        'comprar', 'matricul', 'registrar', 'registrarme',
+        'como me inscribo', 'cómo me inscribo', 'como me anoto', 'cómo me anoto',
+        'como accedo', 'cómo accedo', 'como entro', 'cómo entro',
+        // Intencion directa
         'quiero el curso', 'me interesa el curso', 'quiero inscribirme',
-        'como me inscribo', 'cómo me inscribo', 'como accedo', 'cómo accedo'
+        'quiero comprar', 'quiero pagar', 'lo quiero', 'me lo llevo',
+        'separar cupo', 'reservar cupo', 'reservar', 'apartar',
+        // Disponibilidad
+        'cuándo empieza', 'cuando empieza', 'cuando inicia', 'cuándo inicia',
+        'hay cupos', 'quedan cupos', 'disponible', 'disponibilidad',
+        'proxima fecha', 'próxima fecha', 'siguiente grupo',
+        // Descuentos
+        'descuento', 'promocion', 'promoción', 'oferta', 'rebaja',
     ],
     INTERESADO: [
-        'información', 'informacion', 'info',
+        // Informacion general
+        'información', 'informacion', 'info', 'mas informacion', 'más información',
         'saber', 'cuéntame', 'cuénteme', 'cuentame', 'cuenteme',
-        'conocer', 'qué incluye', 'que incluye',
-        'detalles', 'módulos', 'modulos', 'contenido',
+        'conocer', 'me gustaria saber', 'me gustaría saber',
+        // Contenido del curso
+        'qué incluye', 'que incluye', 'que trae', 'qué trae',
+        'detalles', 'módulos', 'modulos', 'contenido', 'temario',
+        'programa', 'pensum', 'plan de estudios', 'syllabus',
+        // Duracion y formato
         'duración', 'duracion', 'cuanto dura', 'cuánto dura',
-        'temario', 'programa', 'pensum', 'plan de estudios',
-        'certificado', 'certificacion', 'certificación', 'diploma',
         'horario', 'horarios', 'presencial', 'virtual', 'online',
+        'grabaciones', 'acceso de por vida', 'para siempre',
+        // Requisitos
         'materiales', 'requisitos', 'experiencia necesaria',
-        'quién dicta', 'quien dicta', 'profesora', 'instructora'
+        'necesito saber', 'que necesito', 'qué necesito',
+        // Credenciales
+        'certificado', 'certificacion', 'certificación', 'diploma',
+        'aval', 'titulo', 'título',
+        // Sobre la doctora
+        'quién dicta', 'quien dicta', 'profesora', 'instructora',
+        'experiencia', 'trayectoria',
+        // Cursos especificos
+        'carillas', 'resina', 'porcelana', 'estetica', 'estética',
+        'sonrisa', 'blanqueamiento', 'diseño de sonrisa',
+        // Comparacion
+        'a diferencia', 'que tiene de diferente', 'por que este curso',
     ],
     NUEVO: []
 };
 
+// ── KEYWORDS DE OBJECION (para contexto del CRM) ────────────
+const OBJECTION_KEYWORDS = {
+    PRECIO: ['caro', 'costoso', 'muy caro', 'no tengo plata', 'no me alcanza', 'mucho dinero', 'presupuesto', 'no puedo pagar'],
+    TIEMPO: ['no tengo tiempo', 'estoy ocupad', 'muy ocupad', 'no me da tiempo', 'agenda llena', 'despues', 'después', 'mas adelante', 'más adelante', 'otro momento'],
+    DUDA: ['no estoy segur', 'lo voy a pensar', 'pensarlo', 'no se si', 'no sé si', 'será que', 'sera que', 'valdra la pena', 'valdrá la pena'],
+};
+
 const LEVELS = ['NUEVO', 'INTERESADO', 'CALIENTE', 'CLIENTE'];
 
+function normalizeText(text) {
+    return text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 function detectIntent(message) {
-    const lower = message.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const normalized = normalizeText(message);
     for (const level of ['CALIENTE', 'INTERESADO']) {
         const found = INTENT_KEYWORDS[level].some(kw => {
-            const normalizedKw = kw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-            return lower.includes(normalizedKw);
+            return normalized.includes(normalizeText(kw));
         });
         if (found) return level;
+    }
+    return null;
+}
+
+function detectObjection(message) {
+    const normalized = normalizeText(message);
+    for (const [type, keywords] of Object.entries(OBJECTION_KEYWORDS)) {
+        const found = keywords.some(kw => normalized.includes(normalizeText(kw)));
+        if (found) return type;
     }
     return null;
 }
@@ -70,11 +118,24 @@ async function updateCRMLevel(phone, incomingMessage, detectedName = null) {
             updates.name = detectedName;
         }
 
+        // Detectar objeciones y agregarlas como tag
+        const objection = detectObjection(incomingMessage);
+        if (objection) {
+            const currentTags = crm?.tags || [];
+            const objTag = `OBJECION_${objection}`;
+            if (!currentTags.includes(objTag)) {
+                updates.tags = [...currentTags, objTag];
+            }
+        }
+
         await upsertCRMContact(phone, updates);
 
         const levelChanged = finalLabel !== (crm?.label || 'NUEVO');
         if (levelChanged) {
             console.log(`[CRM] ${phone} subio a nivel: ${finalLabel}`);
+        }
+        if (objection) {
+            console.log(`[CRM] ${phone} objecion detectada: ${objection}`);
         }
 
         return { ...crm, ...updates };
@@ -114,7 +175,7 @@ function extractNameFromMessage(message) {
         /^([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)[\s,!]+(?:hola|buenas|buenos|buen)/i,
         /(?:hola|buenas|buenos|buen\w*)[,!.\s]+(?:soy|me llamo)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)/i,
         /(?:hola|buenas)[,!\s]+(?:mi nombre es|me llamo)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?)/i,
-        /(?:habla|escribe|te escribe)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)/i,
+        /(?:habla|escribe|te escribe|le escribe)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)/i,
     ];
 
     for (const pattern of patterns) {
@@ -129,5 +190,6 @@ module.exports = {
     markAsClient,
     addNote,
     extractNameFromMessage,
-    detectIntent
+    detectIntent,
+    detectObjection
 };

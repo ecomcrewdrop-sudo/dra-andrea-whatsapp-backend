@@ -335,46 +335,50 @@ class WhatsAppManager {
         const isLid = jid.includes('@lid');
         const phone = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
 
+        // Detectar tipo de mensaje (audio, imagen, video, etc.)
+        const messageType = this.detectMessageType(msg);
         const text = this.extractMessageText(msg);
-        if (!text || text.trim().length === 0) return;
+
+        // Si no hay texto Y tampoco es un tipo de media conocido, ignorar
+        if ((!text || text.trim().length === 0) && messageType === 'text') return;
+
+        const displayText = text || `[${messageType.toUpperCase()}]`;
 
         const senderName = msg.pushName || this.contactNames.get(jid) || (isLid ? 'Contacto Anuncio' : phone);
         if (msg.pushName) this.contactNames.set(jid, msg.pushName);
 
-        // Actualizar timestamp del watchdog
         this.lastMessageTime = Date.now();
 
-        console.log(`[WA] Mensaje de ${senderName} (${isLid ? 'LID' : phone}): "${text.substring(0, 60)}"`);
+        console.log(`[WA] ${messageType !== 'text' ? `[${messageType}] ` : ''}Mensaje de ${senderName} (${isLid ? 'LID' : phone}): "${displayText.substring(0, 60)}"`);
 
         this.chatsCache.set(jid, {
             jid, phone, isLid,
             name: senderName,
-            lastMessage: text.substring(0, 60),
+            lastMessage: displayText.substring(0, 60),
             lastTime: Date.now()
         });
 
-        // Simular lectura (anti-ban)
         await this.safeSockCall(async () => {
             await this.sock.readMessages([msg.key]);
             await this.sock.presenceSubscribe(jid);
         });
 
-        await saveMessage(jid, phone, 'incoming', text, false);
+        await saveMessage(jid, phone, 'incoming', displayText, false);
 
-        const detectedName = extractNameFromMessage(text);
-        const crmUpdate = await updateCRMLevel(phone, text, detectedName || senderName);
+        const detectedName = text ? extractNameFromMessage(text) : null;
+        const crmUpdate = await updateCRMLevel(phone, text || '', detectedName || senderName);
 
         io.emit('wa:message', {
             jid, phone,
             name: senderName,
-            text,
+            text: displayText,
             direction: 'incoming',
             timestamp: msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now(),
             messageId: msgId,
+            messageType,
             crm: crmUpdate
         });
 
-        // IA activa para este chat?
         let config;
         try {
             config = await getAIConfig();
@@ -389,7 +393,7 @@ class WhatsAppManager {
         }
 
         this.queue.enqueue(jid, async () => {
-            await this.sendAIResponse(jid, phone, text, senderName, config);
+            await this.sendAIResponse(jid, phone, displayText, senderName, config, messageType);
         });
 
         if (crmUpdate && config.auto_reply && !this.aiDisabledChats.has(jid)) {
@@ -415,19 +419,16 @@ class WhatsAppManager {
     /**
      * Genera y envia respuesta de IA con proteccion completa contra caidas
      */
-    async sendAIResponse(jid, phone, incomingText, senderName, config) {
+    async sendAIResponse(jid, phone, incomingText, senderName, config, messageType = 'text') {
         const { io } = this;
 
         try {
-            // 1. Presencia "available"
             await this.safeSockCall(() => this.sock.sendPresenceUpdate('available', jid));
 
-            // 2. Delay de lectura
             const readDelay = 1000 + Math.random() * 2000;
             await sleep(readDelay);
 
-            // 3. Generar respuesta con timeout de seguridad
-            const responsePromise = generateResponse(jid, incomingText, senderName);
+            const responsePromise = generateResponse(jid, incomingText, senderName, messageType);
             const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('OpenAI timeout (45s)')), 45000)
             );
@@ -566,6 +567,20 @@ class WhatsAppManager {
             }
         }
         console.log(`[WA] IA ${enabled ? 'activada' : 'desactivada'} para ${jid}`);
+    }
+
+    detectMessageType(msg) {
+        const m = msg.message;
+        if (!m) return 'text';
+
+        if (m.audioMessage) return 'audio';
+        if (m.imageMessage) return 'image';
+        if (m.videoMessage) return 'video';
+        if (m.stickerMessage) return 'sticker';
+        if (m.documentMessage) return 'document';
+        if (m.locationMessage || m.liveLocationMessage) return 'location';
+        if (m.contactMessage || m.contactsArrayMessage) return 'contact';
+        return 'text';
     }
 
     extractMessageText(msg) {

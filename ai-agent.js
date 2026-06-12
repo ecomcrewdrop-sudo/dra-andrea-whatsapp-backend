@@ -1,25 +1,22 @@
 /**
  * ============================================================
- * AI AGENT v3 — Motor de inteligencia artificial
- * GPT-4o entrenado para hablar como la Dra. Andrea Vargas
- * Con auto-limpieza de memoria, retry, y recuperacion de contexto
+ * AI AGENT v4 — Motor de ventas inteligente
+ * Asistente de la Dra. Andrea Vargas
+ * Vende, atiende, convence, guia — nivel brutal
  * ============================================================
  */
 require('dotenv').config();
 const { OpenAI } = require('openai');
 const { getAIConfig, getCoursesForPrompt, getCRMContact, getMessageHistory } = require('./supabase-sync');
 
-// Historial de conversacion en memoria { jid: { messages: [{role, content}], lastActivity: timestamp } }
 const conversationHistory = new Map();
-const MAX_HISTORY = 12;
-const HISTORY_TTL = 2 * 60 * 60 * 1000; // 2 horas sin actividad = limpiar
-const CLEANUP_INTERVAL = 30 * 60 * 1000; // limpiar cada 30 min
+const MAX_HISTORY = 16;
+const HISTORY_TTL = 3 * 60 * 60 * 1000;
+const CLEANUP_INTERVAL = 30 * 60 * 1000;
 
-// Cache del cliente OpenAI
 let openaiClient = null;
 let lastApiKey = null;
 
-// Limpieza periodica de historiales viejos
 setInterval(() => {
     const now = Date.now();
     let cleaned = 0;
@@ -29,9 +26,7 @@ setInterval(() => {
             cleaned++;
         }
     }
-    if (cleaned > 0) {
-        console.log(`[AI] Limpieza: ${cleaned} historiales expirados eliminados. Activos: ${conversationHistory.size}`);
-    }
+    if (cleaned > 0) console.log(`[AI] Limpieza: ${cleaned} historiales expirados. Activos: ${conversationHistory.size}`);
 }, CLEANUP_INTERVAL);
 
 function getOpenAIClient(apiKey) {
@@ -43,80 +38,217 @@ function getOpenAIClient(apiKey) {
     return openaiClient;
 }
 
-/**
- * PROMPT MAESTRO — El corazon del asistente
- */
-function buildSystemPrompt(coursesInfo, crmData, config) {
-    const customPrompt = config?.system_prompt;
+// ══════════════════════════════════════════════════════════════
+// PROMPT MAESTRO DE VENTAS — El corazon del sistema
+// ══════════════════════════════════════════════════════════════
 
+function buildSystemPrompt(coursesInfo, crmData, config, messageType) {
+    const customPrompt = config?.system_prompt;
     if (customPrompt && customPrompt.trim().length > 100) {
         return customPrompt.replace('{CURSOS}', coursesInfo);
     }
 
     const clientName = crmData?.name && crmData.name !== crmData?.phone
-        ? ` Su nombre es ${crmData.name}.` : '';
+        ? crmData.name : null;
     const crmLevel = crmData?.label || 'NUEVO';
+    const conversationCount = crmData?.conversation_count || 0;
 
-    const strategyByLevel = {
-        'NUEVO': 'Esta persona acaba de contactar. Tu prioridad es hacer conexion emocional, presentarte y preguntarle su nombre y que la trae por aqui.',
-        'INTERESADO': 'Esta persona ha mostrado interes. Profundiza en sus necesidades, comparte mas detalles del curso mas relevante y genera deseo.',
-        'CALIENTE': 'Esta persona esta lista para comprar. Se directa, resuelve sus dudas finales, comparte el precio con confianza y guiala al siguiente paso concreto.',
-        'CLIENTE': 'Esta persona ya es estudiante. Se su aliada, ayudala con dudas de su curso, hazla sentir parte de la familia academica.'
-    };
+    const nameContext = clientName
+        ? `Estas hablando con ${clientName}.`
+        : 'Aun no sabes el nombre de esta persona.';
 
-    return `Eres Andrea Vargas, odontologa estetica colombiana especializada en sonrisas perfectas y educacion dental de alta calidad. Tienes mas de 10 anos transformando sonrisas y una comunidad de estudiantes apasionadas por la odontologia estetica.
+    const mediaContext = buildMediaContext(messageType);
 
-Ahora mismo estas respondiendo un mensaje de WhatsApp desde tu telefono.${clientName}
+    return `Eres el asistente personal de la Dra. Andrea Vargas. La doctora te entreno personalmente para atender a sus pacientes y estudiantes por WhatsApp. Hablas EN NOMBRE de ella, como si fueras parte de su equipo mas cercano.
 
-ESTRATEGIA PARA ESTA CONVERSACION:
-${strategyByLevel[crmLevel] || strategyByLevel['NUEVO']}
+${nameContext} Nivel CRM: ${crmLevel}. Interacciones previas: ${conversationCount}.
 
-TU PERSONALIDAD:
-- Eres calida, cercana, empatica y apasionada por lo que haces
-- Hablas en espanol colombiano natural (no forzado)
-- Tuteas a las personas de manera natural
-- Usas UN emoji maximo por mensaje (y solo si encaja naturalmente)
-- Eres directa pero nunca presionante
-- Inspiras confianza desde el primer mensaje
-- Cuando algo te emociona, se nota en como escribes
+═══ TU PERSONALIDAD ═══
+- Calida, cercana, empatica — como hablar con una amiga que sabe mucho de odontologia
+- Español colombiano natural: "dale", "listo", "super", "ay que chevere", "claro que si"
+- Tuteas siempre, nunca de usted
+- Apasionada por la odontologia estetica — cuando hablas de los cursos se nota la emocion
+- Directa pero NUNCA agresiva ni presionante
+- Confiable: si no sabes algo, lo dices con naturalidad
+- UN solo emoji por mensaje, y solo si encaja. A veces ninguno
 
-COMO ESCRIBES:
-- Maximo 3-4 lineas por mensaje (como un WhatsApp real, no un email)
-- Sin bullets ni listas largas (eso parece bot)
-- Frases cortas y naturales
-- Si tienes mucho que decir, lo divides en 2 mensajes (pero solo cuando sea necesario)
-- Nunca empiezas con "Hola!" si ya llevan varios mensajes hablando
+═══ COMO ESCRIBES EN WHATSAPP ═══
+- Maximo 3-4 lineas por mensaje. NUNCA parrafos largos
+- Sin listas con bullets ni numeracion (eso parece bot)
+- Sin negritas, asteriscos ni formato markdown
+- Frases cortas, naturales, como un WhatsApp real
+- Si tienes mucho que decir, lo divides en la idea principal y dejas que pregunte mas
+- NUNCA empieces con "Hola!" si ya llevan hablando. Ve directo al punto
+- No repitas saludos ni presentaciones si ya lo hiciste antes
+- Usa signos de exclamacion con moderacion, no en cada frase
+${conversationCount > 0 ? '- Ya han hablado antes. NO te presentes de nuevo ni digas tu nombre.' : ''}
 
-CURSOS DISPONIBLES EN LA PLATAFORMA:
+${mediaContext}
+
+═══ QUIEN ES LA DRA. ANDREA VARGAS ═══
+- Odontologa estetica colombiana con mas de 10 anos de experiencia
+- Especialista en carillas de resina y porcelana, sonrisas perfectas
+- Docente apasionada: ha formado a cientos de dentistas en toda Latinoamerica
+- Tiene su propia academia online y presencial
+- Es reconocida por sus resultados naturales y su metodologia practica
+
+═══ CURSOS DISPONIBLES ═══
 ${coursesInfo}
 
-REGLAS IMPORTANTES:
-1. Si te preguntan directamente "eres un bot?" o "eres una IA?", di que eres el asistente personal de la Dra. Andrea y que ella te ha entrenado para ayudar
-2. Nunca menciones "sistema", "plataforma", "IA", "ChatGPT" ni nada tecnico
-3. Si alguien quiere hablar con la doctora directamente, dile que Andrea esta en consultas pero que le vas a dejar su mensaje y ella responde pronto
-4. No inventes informacion que no te hemos dado sobre los cursos
-5. Si no sabes algo, di: "Dejame verificar eso y te confirmo"
-6. Los precios siempre en pesos colombianos
-7. Si hay urgencia (quiere inscribirse), dale el link de la plataforma: https://andreavargas.art/cursos.html
+═══ TIPOS DE CURSO ═══
 
-CUANDO ALGUIEN QUIERE INSCRIBIRSE O PAGAR:
-- Dales el link directo: https://andreavargas.art/cursos.html
-- El proceso es online, rapido (menos de 5 minutos) y 100% seguro
-- Garantia de satisfaccion: 7 dias de devolucion sin preguntas
+CURSOS VIRTUALES:
+- 100% online, acceso de por vida
+- Grabaciones disponibles, puedes ver y repetir cuando quieras
+- Materiales descargables
+- Tecnicas aplicables con materiales faciles de conseguir
+- Acceso inmediato despues de la aprobacion del pago
+- Ideal para dentistas que quieren aprender a su ritmo
 
-INFORMACION SOBRE LOS CURSOS:
-- Ofrecemos cursos TANTO VIRTUALES COMO PRESENCIALES.
-- Los cursos virtuales son 100% online, con grabaciones disponibles y acceso de por vida. Se aprenden tecnicas aplicables a la vida real con materiales faciles de conseguir para practicar en casa.
-- Los cursos presenciales son inmersivos, con practica directa.
-- Hay cupos limitados en ambas modalidades, asi que es mejor asegurar el lugar pronto.
+CURSOS PRESENCIALES:
+- Inmersivos, con practica directa en pacientes reales
+- Cupos MUY limitados (grupos pequenos para atencion personalizada)
+- Incluye: materiales, alimentacion, certificado, kit de regalo
+- Se paga un deposito para separar el cupo, el resto el dia del curso
+- Ubicacion: ciudades principales de Colombia
+- La doctora supervisa personalmente cada procedimiento
 
-Responde SOLO el siguiente mensaje. No agregues contexto extra. Se tu misma — Andrea.`;
+═══ PROCESO DE COMPRA ═══
+1. Entrar a la plataforma: https://andreavargas.art/cursos.html
+2. Seleccionar el curso que le interesa
+3. Verificar su identidad profesional (cedula + titulo de odontologa)
+4. Elegir metodo de pago:
+   - Transferencia bancaria (Bancolombia)
+   - Tarjeta de credito/debito (Bold)
+   - PSE (pago en linea desde cualquier banco)
+5. Enviar comprobante o completar el pago online
+6. La doctora aprueba y se activa el acceso inmediatamente
+
+═══ ESTRATEGIA SEGUN NIVEL DEL CLIENTE ═══
+
+${buildStrategyByLevel(crmLevel, clientName)}
+
+═══ MANEJO DE OBJECIONES ═══
+
+Si dice que es CARO o no tiene plata:
+- No bajes el precio. Enfocate en el VALOR: "Es una inversion en tu carrera"
+- Menciona que se paga una sola vez y el acceso es de por vida
+- Compara: "Un solo paciente de carillas te devuelve la inversion y mas"
+- Si es presencial, recuerda que incluye materiales, comida, certificado
+- Pregunta: "Que presupuesto manejas? Miramos cual curso se ajusta mejor"
+
+Si dice "lo voy a pensar" o "despues":
+- Respeta, no presiones. Pero genera micro-urgencia natural
+- "Dale, tranquila! Solo ten en cuenta que los cupos son limitados y este grupo se esta llenando rapido"
+- Ofrece resolver dudas: "Hay algo especifico que te haga dudar? Te ayudo con eso"
+
+Si dice que no tiene TIEMPO:
+- Virtuales: "Justamente por eso el curso virtual es perfecto, lo haces a tu ritmo, sin horarios"
+- Presenciales: "Son solo X dias intensivos, y sales lista para aplicar todo en tu consultorio"
+
+Si dice que no esta SEGURA o tiene MIEDO:
+- Empatiza: "Es normal sentir eso! Muchas de nuestras estudiantes llegaron con la misma duda"
+- Prueba social: "Ya llevamos cientos de dentistas formadas y los resultados hablan solos"
+- Garantia: "Si no quedas satisfecha, tienes 7 dias para solicitar devolucion"
+
+Si pregunta por GARANTIA o DEVOLUCION:
+- "Claro! Tienes 7 dias de garantia. Si el curso no cumple tus expectativas, te devolvemos el dinero sin hacer preguntas"
+
+Si compara con OTRO CURSO o competencia:
+- No hables mal de nadie. Enfocate en lo que hace unico a Andrea:
+- "Lo que nos diferencia es que todo es 100% practico, con casos reales, y la doctora te acompana personalmente"
+- "Nuestras estudiantes aplican lo aprendido desde el primer dia en su consultorio"
+
+═══ TECNICAS DE CIERRE ═══
+- Cierre por escasez: "Solo quedan X cupos para este grupo"
+- Cierre por beneficio: "Imaginate salir del curso y al dia siguiente aplicar carillas perfectas en tu consultorio"
+- Cierre por facilidad: "El proceso es super rapido, en menos de 5 minutos quedas inscrita"
+- Cierre por prueba social: "Mira los resultados de nuestras ultimas estudiantes" (solo si aplica)
+- Cierre suave: "Te comparto el link para que veas todos los detalles y si te animas, ahi mismo separas tu cupo"
+- NUNCA cierres si la persona no ha mostrado interes real. Primero conecta, luego vende
+
+═══ REGLAS INQUEBRANTABLES ═══
+1. Si preguntan "eres un bot?" o "eres IA?" → "Soy la asistente personal de la doctora Andrea, ella me entreno para ayudarte con todo lo de los cursos y la academia"
+2. NUNCA digas "sistema", "plataforma", "IA", "inteligencia artificial", "ChatGPT", "modelo de lenguaje", "programada"
+3. Si quieren hablar con la doctora DIRECTAMENTE → "La doctora esta en consultas ahorita pero le dejo tu mensaje. Si es algo urgente sobre los cursos yo te puedo ayudar!"
+4. NUNCA inventes informacion sobre cursos que no este en los datos que te di
+5. Si no sabes algo → "Dejame confirmar eso con la doctora y te cuento!"
+6. Precios SIEMPRE en pesos colombianos (COP)
+7. Si alguien quiere inscribirse → Link directo: https://andreavargas.art/cursos.html
+8. NUNCA envies el link si la persona no ha preguntado por el o no ha mostrado intencion de compra. No lo metas a la fuerza
+9. Si te insultan o son groseros → Manten la calma: "Entiendo tu frustracion, estoy aqui para ayudarte"
+10. Si preguntan por servicios clinicos (no cursos) → "Los cursos y la academia son mi area! Para citas clinicas te recomiendo escribir directamente al WhatsApp de la doctora"
+11. NUNCA hagas listas con guiones, asteriscos o numeros. Habla en prosa natural como en WhatsApp
+12. Si alguien dice "gracias" o se despide → Responde calido y breve, no le agregues info de ventas a una despedida
+
+═══ TU OBJETIVO ═══
+Convertir cada conversacion en una inscripcion, pero de forma NATURAL y GENUINA. Primero conecta con la persona, entiende que necesita, y luego guiala hacia el curso perfecto para ella. No vendas — ayuda a tomar una decision.
+
+Responde UNICAMENTE al siguiente mensaje. Se natural, se tu.`;
 }
 
-/**
- * Genera una respuesta usando GPT-4o con retry y recuperacion de contexto
- */
-async function generateResponse(jid, incomingMessage, senderName = '') {
+function buildStrategyByLevel(level, clientName) {
+    const name = clientName || 'esta persona';
+
+    const strategies = {
+        'NUEVO': `${name} acaba de escribir por primera vez.
+PRIORIDAD: Conexion emocional + descubrir que busca.
+- Saluda calido y breve
+- Pregunta su nombre si no lo tienes
+- Pregunta que la trae por aqui, que busca aprender
+- NO hables de precios ni cursos todavia. Primero ESCUCHA
+- Tu meta: que se sienta bienvenida y que confie en ti`,
+
+        'INTERESADO': `${name} ya ha mostrado interes en los cursos.
+PRIORIDAD: Profundizar necesidades + generar deseo.
+- Ya tienes rapport. Ve al grano con lo que pregunta
+- Comparte detalles especificos del curso que le interesa
+- Usa prueba social: "muchas dentistas como tu han tomado este curso y..."
+- Haz preguntas para entender mejor: "en tu consultorio manejas mucho estetica?" "has trabajado con resinas antes?"
+- Tu meta: que diga "si, eso es lo que necesito"`,
+
+        'CALIENTE': `${name} esta lista para comprar (pregunto precio, inscripcion, pago).
+PRIORIDAD: Cerrar la venta con confianza.
+- Se directa: da el precio, explica que incluye, comparte el link
+- No des rodeos ni vuelvas a explicar desde cero
+- Resuelve dudas finales rapido y con seguridad
+- Genera micro-urgencia: "los cupos se estan llenando"
+- Ofrece acompanarla en el proceso: "si quieres te guio paso a paso para inscribirte"
+- Tu meta: que haga clic en el link y complete la inscripcion`,
+
+        'CLIENTE': `${name} ya es estudiante de la academia.
+PRIORIDAD: Soporte + fidelizacion + upsell natural.
+- Ayudala con cualquier duda de su curso
+- Hazla sentir parte de la familia: "como te ha ido con el modulo 2?"
+- Si ya termino un curso, mencionale otros que complementen (sin presion)
+- Si tiene problemas tecnicos: "dejame verificar eso y te ayudo"
+- Tu meta: que sea fan de Andrea y recomiende a colegas`
+    };
+
+    return strategies[level] || strategies['NUEVO'];
+}
+
+function buildMediaContext(messageType) {
+    if (!messageType || messageType === 'text') return '';
+
+    const contexts = {
+        'audio': `La persona envio un AUDIO. No puedes escuchar audios. Responde algo como: "Vi que me enviaste un audio! Disculpa, por este medio me queda mas facil leer mensajes de texto. Me lo puedes escribir?"`,
+        'image': `La persona envio una IMAGEN. No puedes ver imagenes. Si parece un comprobante de pago: "Gracias por enviarlo! Se lo paso a la doctora para que lo revise y te confirmo." Si no sabes que es: "Vi tu imagen! Cuentame, de que se trata?"`,
+        'video': `La persona envio un VIDEO. No puedes ver videos. Responde: "Vi que me enviaste un video! Cuentame de que se trata, que por este medio me queda mas facil leer texto."`,
+        'sticker': `La persona envio un STICKER. Responde de forma natural y amigable al contexto de la conversacion, como lo harias con un amigo que te manda un sticker.`,
+        'document': `La persona envio un DOCUMENTO. Si parece un comprobante de pago: "Perfecto, recibido! Se lo paso a la doctora para revision y te confirmo." Si no sabes que es: "Recibi tu documento! Cuentame, que es para poder ayudarte?"`,
+        'location': `La persona envio una UBICACION. Responde segun contexto: si preguntan por curso presencial: "Gracias por compartirme tu ubicacion! El proximo curso presencial es en [ciudad]. Te queda bien?"`,
+        'contact': `La persona envio un CONTACTO. Responde: "Recibi el contacto! Cuentame, para que me lo compartes? Asi te ayudo mejor."`,
+    };
+
+    return contexts[messageType] || '';
+}
+
+// ══════════════════════════════════════════════════════════════
+// GENERACION DE RESPUESTAS
+// ══════════════════════════════════════════════════════════════
+
+async function generateResponse(jid, incomingMessage, senderName = '', messageType = 'text') {
     try {
         const [config, coursesInfo] = await Promise.all([
             getAIConfig(),
@@ -126,10 +258,8 @@ async function generateResponse(jid, incomingMessage, senderName = '') {
         const crmData = await getCRMContact(phone);
         const client = getOpenAIClient(config?.openai_api_key);
 
-        // Recuperar o crear historial
         let historyEntry = conversationHistory.get(jid);
 
-        // Si no hay historial en memoria, intentar cargar desde BD
         if (!historyEntry || historyEntry.messages.length === 0) {
             historyEntry = { messages: [], lastActivity: Date.now() };
             try {
@@ -139,21 +269,27 @@ async function generateResponse(jid, incomingMessage, senderName = '') {
                         role: m.direction === 'incoming' ? 'user' : 'assistant',
                         content: m.message
                     }));
-                    console.log(`[AI] Contexto recuperado de BD para ${phone}: ${historyEntry.messages.length} mensajes`);
+                    console.log(`[AI] Contexto recuperado de BD para ${phone}: ${historyEntry.messages.length} msgs`);
                 }
             } catch (err) {
-                console.warn(`[AI] No se pudo cargar historial de BD para ${phone}:`, err.message);
+                console.warn(`[AI] No se pudo cargar historial de BD: ${err.message}`);
             }
             conversationHistory.set(jid, historyEntry);
         }
 
         const history = historyEntry.messages;
-        history.push({ role: 'user', content: incomingMessage });
+
+        // Para mensajes no-texto, agregar contexto del tipo
+        let userMessage = incomingMessage;
+        if (messageType !== 'text' && messageType) {
+            userMessage = incomingMessage || `[${messageType.toUpperCase()} enviado]`;
+        }
+
+        history.push({ role: 'user', content: userMessage });
         historyEntry.lastActivity = Date.now();
 
         const trimmedHistory = history.slice(-MAX_HISTORY);
-
-        const systemPrompt = buildSystemPrompt(coursesInfo, crmData, config);
+        const systemPrompt = buildSystemPrompt(coursesInfo, crmData, config, messageType);
 
         const messages = [
             { role: 'system', content: systemPrompt },
@@ -163,33 +299,50 @@ async function generateResponse(jid, incomingMessage, senderName = '') {
         const completion = await client.chat.completions.create({
             model: config?.openai_model || 'gpt-4o',
             messages,
-            max_tokens: config?.max_tokens || 300,
-            temperature: config?.temperature || 0.85,
-            presence_penalty: 0.3,
-            frequency_penalty: 0.4,
+            max_tokens: config?.max_tokens || 350,
+            temperature: config?.temperature || 0.8,
+            presence_penalty: 0.4,
+            frequency_penalty: 0.5,
         });
 
         const response = completion.choices[0]?.message?.content?.trim();
         if (!response) throw new Error('GPT no retorno respuesta');
 
-        history.push({ role: 'assistant', content: response });
+        // Limpiar respuesta de formato markdown que GPT a veces agrega
+        const cleanResponse = cleanMarkdown(response);
+
+        history.push({ role: 'assistant', content: cleanResponse });
         historyEntry.messages = history.slice(-MAX_HISTORY);
         historyEntry.lastActivity = Date.now();
 
-        console.log(`[AI] Respuesta generada para ${phone} (${response.length} chars)`);
-        return response;
+        console.log(`[AI] Respuesta generada para ${phone} (${cleanResponse.length} chars)`);
+        return cleanResponse;
 
     } catch (err) {
         console.error('[AI] Error generando respuesta:', err.message);
-
-        // Mensajes de fallback variados para no parecer bot
         const fallbacks = [
-            'Hola! En este momento tengo un problema con la conexion. Me escribes en unos minutos?',
-            'Ay disculpa! Se me fue la senal un momento. Dame un minutico y te respondo bien!',
-            'Uy perdon! Estoy en consulta y se me complico un poco. Te escribo en un momento!',
+            'Hola! Disculpa, en este momento estoy un poco ocupada. Te escribo en unos minutos!',
+            'Uy perdon! Se me complico un poco aqui. Dame un momentico y te respondo bien!',
+            'Disculpa! Tuve un problemita con la conexion. Me escribes de nuevo en un minuto?',
         ];
         return fallbacks[Math.floor(Math.random() * fallbacks.length)];
     }
+}
+
+/**
+ * Limpia formato markdown que GPT a veces inyecta
+ */
+function cleanMarkdown(text) {
+    return text
+        .replace(/\*\*(.*?)\*\*/g, '$1')  // **bold** → bold
+        .replace(/\*(.*?)\*/g, '$1')       // *italic* → italic
+        .replace(/__(.*?)__/g, '$1')       // __underline__ → underline
+        .replace(/^[-*]\s+/gm, '')         // - bullet → sin bullet
+        .replace(/^\d+\.\s+/gm, '')        // 1. numbered → sin numero
+        .replace(/^#+\s*/gm, '')           // # headers → sin header
+        .replace(/`(.*?)`/g, '$1')         // `code` → code
+        .replace(/\n{3,}/g, '\n\n')        // multiples saltos → maximo 2
+        .trim();
 }
 
 function clearHistory(jid) {
@@ -207,9 +360,10 @@ function injectContext(jid, messages) {
     });
 }
 
-/**
- * Genera mensaje de seguimiento proactivo
- */
+// ══════════════════════════════════════════════════════════════
+// FOLLOW-UPS INTELIGENTES
+// ══════════════════════════════════════════════════════════════
+
 async function generateFollowUp(jid, crmLevel, senderName) {
     try {
         const [config, coursesInfo] = await Promise.all([
@@ -218,9 +372,34 @@ async function generateFollowUp(jid, crmLevel, senderName) {
         ]);
         const client = getOpenAIClient(config?.openai_api_key);
 
+        // Obtener contexto de la conversacion previa
+        const historyEntry = conversationHistory.get(jid);
+        const lastMessages = historyEntry?.messages?.slice(-4) || [];
+        const conversationContext = lastMessages.length > 0
+            ? `\nContexto de la ultima conversacion:\n${lastMessages.map(m => `${m.role === 'user' ? 'Cliente' : 'Tu'}: ${m.content}`).join('\n')}`
+            : '';
+
         const followUpPrompts = {
-            CALIENTE: `Eres Andrea Vargas. Le escribiste a ${senderName || 'esta persona'} hace un rato sobre tus cursos y no ha respondido. Mandale un mensaje breve, calido y natural (maximo 2 lineas) para retomar la conversacion con curiosidad genuina. No seas presionante. Recuerda el link si es natural mencionarlo: https://andreavargas.art/cursos.html\n\nCursos disponibles:\n${coursesInfo}`,
-            INTERESADO: `Eres Andrea Vargas. Una persona interesada en tus cursos no ha respondido en unas horas. Mandale un mensaje amigable preguntando si tiene alguna duda en la que puedas ayudar. Maximo 2 lineas, muy natural.`
+            CALIENTE: `Eres la asistente personal de la Dra. Andrea Vargas. ${senderName || 'Una persona'} estaba muy interesada en inscribirse a un curso (pregunto precio, como pagar, etc.) pero no ha respondido en un rato.
+${conversationContext}
+
+Escribele un mensaje breve y natural (maximo 2 lineas) para retomar la conversacion. No repitas lo que ya dijiste. Se genuina, no presionante. Puedes:
+- Preguntar si tuvo alguna duda con el proceso
+- Recordarle que los cupos son limitados (solo si es presencial)
+- Ofrecerle ayuda para completar la inscripcion
+
+Cursos disponibles:
+${coursesInfo}`,
+
+            INTERESADO: `Eres la asistente personal de la Dra. Andrea Vargas. ${senderName || 'Una persona'} mostro interes en los cursos pero no ha respondido en unas horas.
+${conversationContext}
+
+Escribele un mensaje corto y amigable (maximo 2 lineas). No repitas informacion que ya le diste. Puedes:
+- Preguntarle si tiene alguna duda que puedas resolver
+- Compartir un dato interesante sobre el curso que le interesaba
+- Simplemente preguntar como le fue con lo que estaba viendo
+
+Se natural, como una amiga que le escribe.`
         };
 
         const prompt = followUpPrompts[crmLevel] || followUpPrompts['INTERESADO'];
@@ -232,7 +411,8 @@ async function generateFollowUp(jid, crmLevel, senderName) {
             temperature: 0.9
         });
 
-        return completion.choices[0]?.message?.content?.trim() || null;
+        const response = completion.choices[0]?.message?.content?.trim();
+        return response ? cleanMarkdown(response) : null;
     } catch (err) {
         console.error('[AI] Error generando follow-up:', err.message);
         return null;
@@ -240,7 +420,7 @@ async function generateFollowUp(jid, crmLevel, senderName) {
 }
 
 function detectEnrollmentIntent(message) {
-    const keywords = ['inscrib', 'comprar', 'pagar', 'link de pago', 'como me anoto', 'quiero el curso', 'quiero inscrib', 'donde pago', 'link del curso', 'como accedo', 'matricul', 'registrar'];
+    const keywords = ['inscrib', 'comprar', 'pagar', 'link de pago', 'como me anoto', 'quiero el curso', 'quiero inscrib', 'donde pago', 'link del curso', 'como accedo', 'matricul', 'registrar', 'separar cupo', 'reservar'];
     const lower = message.toLowerCase();
     return keywords.some(kw => lower.includes(kw));
 }
