@@ -1,0 +1,1414 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp IA · Dra. Andrea Vargas</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Cinzel:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --gold:        #c9973f;
+            --gold-light:  #e8b86d;
+            --gold-dim:    rgba(201,151,63,0.12);
+            --gold-glow:   rgba(201,151,63,0.25);
+            --bg:          #070709;
+            --surface:     #0e0e12;
+            --surface2:    #13131a;
+            --surface3:    #191922;
+            --border:      rgba(255,255,255,0.06);
+            --border2:     rgba(255,255,255,0.10);
+            --green:       #2ecc71;
+            --green-dim:   rgba(46,204,113,0.12);
+            --red:         #e74c3c;
+            --blue:        #3498db;
+            --orange:      #e67e22;
+            --text:        #e8e8f0;
+            --text2:       #9999b0;
+            --text3:       #555568;
+            --radius:      12px;
+            --radius-sm:   8px;
+            --shadow:      0 8px 32px rgba(0,0,0,0.5);
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            overflow: hidden;
+            font-size: 14px;
+        }
+
+        /* ══════════════════════════════════════════════
+           TOP BAR
+        ══════════════════════════════════════════════ */
+        .topbar {
+            height: 52px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .topbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: 'Cinzel', serif;
+            font-size: 0.85rem;
+            color: var(--gold);
+            letter-spacing: 1px;
+        }
+
+        .topbar-brand i { font-size: 1.1rem; }
+
+        .topbar-center {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-pill {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            border: 1px solid;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .status-pill .dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%,100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+        .topbar-btn {
+            padding: 6px 14px;
+            border-radius: 8px;
+            border: 1px solid var(--border2);
+            background: rgba(255,255,255,0.04);
+            color: var(--text2);
+            font-size: 0.75rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .topbar-btn:hover { background: var(--gold-dim); color: var(--gold); border-color: var(--gold); }
+        .topbar-btn.danger:hover { background: rgba(231,76,60,0.1); color: var(--red); border-color: var(--red); }
+
+        /* ══════════════════════════════════════════════
+           MAIN LAYOUT
+        ══════════════════════════════════════════════ */
+        .app {
+            display: flex;
+            height: 100vh;
+            padding-top: 52px;
+        }
+
+        /* ══════════════════════════════════════════════
+           SIDEBAR — LISTA DE CHATS
+        ══════════════════════════════════════════════ */
+        .sidebar {
+            width: 320px;
+            min-width: 280px;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .sidebar-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sidebar-header h3 {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--text3);
+            margin-bottom: 12px;
+        }
+
+        .search-box {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 9px 12px;
+            transition: border-color 0.2s;
+        }
+        .search-box:focus-within { border-color: var(--gold); }
+        .search-box i { color: var(--text3); font-size: 0.8rem; }
+        .search-box input {
+            background: none;
+            border: none;
+            outline: none;
+            color: var(--text);
+            font-size: 0.85rem;
+            flex: 1;
+            font-family: inherit;
+        }
+        .search-box input::placeholder { color: var(--text3); }
+
+        .chat-list {
+            flex: 1;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: #222 transparent;
+        }
+        .chat-list::-webkit-scrollbar { width: 3px; }
+        .chat-list::-webkit-scrollbar-thumb { background: #252530; border-radius: 4px; }
+
+        .chat-list-empty {
+            padding: 40px 20px;
+            text-align: center;
+            color: var(--text3);
+        }
+        .chat-list-empty i { font-size: 2.5rem; margin-bottom: 12px; display: block; opacity: 0.3; }
+        .chat-list-empty p { font-size: 0.8rem; }
+
+        /* Chat item */
+        .chat-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            cursor: pointer;
+            transition: background 0.15s;
+            border-bottom: 1px solid rgba(255,255,255,0.02);
+            position: relative;
+        }
+        .chat-item:hover { background: rgba(255,255,255,0.03); }
+        .chat-item.active {
+            background: var(--gold-dim);
+            border-left: 3px solid var(--gold);
+        }
+
+        .chat-avatar {
+            width: 46px; height: 46px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--gold);
+            flex-shrink: 0;
+            position: relative;
+            background: linear-gradient(135deg, #1a1a28, #12121c);
+            border: 1.5px solid var(--border2);
+        }
+
+        .chat-crm-dot {
+            position: absolute;
+            bottom: 1px; right: 1px;
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            border: 2px solid var(--surface);
+        }
+
+        .chat-body { flex: 1; min-width: 0; }
+
+        .chat-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 3px;
+        }
+
+        .chat-name {
+            font-weight: 600;
+            font-size: 0.88rem;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 160px;
+        }
+
+        .chat-time { font-size: 0.68rem; color: var(--text3); flex-shrink: 0; }
+
+        .chat-preview {
+            font-size: 0.77rem;
+            color: var(--text2);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 190px;
+        }
+
+        .chat-badges { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+
+        .unread-dot {
+            background: var(--gold);
+            color: #000;
+            font-size: 0.62rem;
+            font-weight: 800;
+            padding: 2px 6px;
+            border-radius: 10px;
+            min-width: 18px;
+            text-align: center;
+        }
+
+        /* ══════════════════════════════════════════════
+           QR SECTION
+        ══════════════════════════════════════════════ */
+        #qrSection {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 28px;
+            padding: 40px;
+            background: radial-gradient(ellipse at 50% 50%, rgba(201,151,63,0.04) 0%, transparent 70%);
+        }
+
+        .qr-title {
+            text-align: center;
+        }
+        .qr-title h2 {
+            font-family: 'Cinzel', serif;
+            font-size: 1.5rem;
+            color: var(--gold);
+            margin-bottom: 6px;
+        }
+        .qr-title p { color: var(--text2); font-size: 0.85rem; }
+
+        .qr-frame {
+            position: relative;
+            padding: 14px;
+            background: #fff;
+            border-radius: 18px;
+            box-shadow: 0 0 0 1px rgba(201,151,63,0.3), 0 20px 60px rgba(201,151,63,0.2);
+            animation: qrPulse 3s ease-in-out infinite;
+        }
+        @keyframes qrPulse {
+            0%,100% { box-shadow: 0 0 0 1px rgba(201,151,63,0.3), 0 20px 60px rgba(201,151,63,0.15); }
+            50%      { box-shadow: 0 0 0 3px rgba(201,151,63,0.5), 0 20px 80px rgba(201,151,63,0.35); }
+        }
+
+        #qrImage { display: none; border-radius: 6px; }
+
+        #qrSpinner {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 14px;
+            padding: 30px;
+        }
+
+        .spinner {
+            width: 36px; height: 36px;
+            border: 3px solid var(--surface3);
+            border-top-color: var(--gold);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .qr-steps {
+            display: flex;
+            gap: 32px;
+        }
+        .qr-step {
+            text-align: center;
+            color: var(--text3);
+            font-size: 0.75rem;
+            max-width: 100px;
+            line-height: 1.5;
+        }
+        .qr-step i { font-size: 1.4rem; color: var(--gold); display: block; margin-bottom: 8px; opacity: 0.8; }
+
+        #connDiag {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 18px;
+            font-size: 0.75rem;
+            color: var(--text3);
+            max-width: 400px;
+            width: 100%;
+            line-height: 2;
+        }
+        #connDiag span { font-weight: 600; }
+
+        .qr-action-btn {
+            background: none;
+            border: 1px solid var(--border2);
+            color: var(--text3);
+            padding: 8px 22px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        .qr-action-btn:hover { border-color: var(--gold); color: var(--gold); }
+
+        /* ══════════════════════════════════════════════
+           CHAT SECTION
+        ══════════════════════════════════════════════ */
+        #chatSection {
+            display: none;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Central chat panel */
+        .chat-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #080810;
+            background-image:
+                radial-gradient(ellipse at 20% 20%, rgba(201,151,63,0.02) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(46,204,113,0.015) 0%, transparent 50%);
+            min-width: 0;
+        }
+
+        /* Chat header */
+        .chat-header {
+            padding: 12px 18px;
+            background: rgba(14,14,18,0.8);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            backdrop-filter: blur(12px);
+            flex-shrink: 0;
+        }
+
+        .chat-header-left { display: flex; align-items: center; gap: 12px; }
+
+        .header-info h4 { font-size: 0.95rem; font-weight: 600; color: var(--text); }
+        .header-info .header-phone { font-size: 0.72rem; color: var(--text3); }
+        #chatPresence { font-size: 0.72rem; color: var(--green); min-height: 14px; display: block; }
+
+        .chat-header-right { display: flex; align-items: center; gap: 10px; }
+
+        /* AI Toggle */
+        .ai-pill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--surface2);
+            padding: 6px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            transition: all 0.2s;
+        }
+        .ai-pill.active { border-color: rgba(46,204,113,0.3); background: rgba(46,204,113,0.06); }
+
+        .toggle {
+            position: relative;
+            width: 32px; height: 18px;
+            flex-shrink: 0;
+        }
+        .toggle input { opacity: 0; width: 0; height: 0; }
+        .toggle-track {
+            position: absolute;
+            inset: 0;
+            background: #333;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+        .toggle-thumb {
+            position: absolute;
+            width: 12px; height: 12px;
+            border-radius: 50%;
+            background: #fff;
+            top: 3px; left: 3px;
+            transition: 0.3s;
+        }
+        .toggle input:checked ~ .toggle-track { background: var(--green); }
+        .toggle input:checked ~ .toggle-thumb { left: 17px; }
+        #aiToggleLabel { font-size: 0.72rem; font-weight: 600; color: var(--text2); }
+
+        .icon-btn {
+            width: 34px; height: 34px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.03);
+            color: var(--text3);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            font-size: 0.8rem;
+        }
+        .icon-btn:hover { background: var(--gold-dim); color: var(--gold); border-color: rgba(201,151,63,0.3); }
+
+        /* Empty state */
+        #chatEmptyState {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text3);
+            gap: 14px;
+        }
+        #chatEmptyState i { font-size: 3.5rem; opacity: 0.1; }
+        #chatEmptyState h3 { font-family: 'Cinzel', serif; color: #2a2a35; font-size: 1.1rem; }
+        #chatEmptyState p { font-size: 0.8rem; color: #2a2a35; }
+
+        /* Messages area */
+        #chatArea {
+            display: none;
+            flex-direction: column;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        #messagesContainer {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            scrollbar-width: thin;
+            scrollbar-color: #1a1a24 transparent;
+        }
+        #messagesContainer::-webkit-scrollbar { width: 3px; }
+        #messagesContainer::-webkit-scrollbar-thumb { background: #1a1a24; border-radius: 4px; }
+
+        /* Message bubbles */
+        .message-bubble {
+            display: flex;
+            margin-bottom: 2px;
+            animation: bubbleIn 0.2s ease;
+        }
+        @keyframes bubbleIn {
+            from { opacity: 0; transform: translateY(6px) scale(0.98); }
+            to   { opacity: 1; transform: none; }
+        }
+        .message-bubble.outgoing { justify-content: flex-end; }
+        .message-bubble.incoming { justify-content: flex-start; }
+
+        .bubble-inner {
+            max-width: 62%;
+            padding: 10px 14px;
+            border-radius: 14px;
+            font-size: 0.875rem;
+            line-height: 1.55;
+            position: relative;
+        }
+        .message-bubble.outgoing .bubble-inner {
+            background: linear-gradient(135deg, #1a3a1f, #162c1b);
+            border: 1px solid rgba(46,204,113,0.15);
+            border-radius: 14px 3px 14px 14px;
+        }
+        .message-bubble.incoming .bubble-inner {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 3px 14px 14px 14px;
+        }
+
+        .bubble-sender {
+            font-size: 0.68rem;
+            font-weight: 700;
+            color: var(--gold);
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .bubble-text { color: var(--text); word-break: break-word; }
+
+        .bubble-meta {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 5px;
+            margin-top: 6px;
+        }
+        .bubble-time { font-size: 0.63rem; color: var(--text3); }
+        .bubble-tick { font-size: 0.7rem; color: var(--gold); }
+        .ai-label { font-size: 0.6rem; color: var(--gold); opacity: 0.6; }
+
+        .bubble-type-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.72rem;
+            color: var(--gold-light);
+            background: rgba(201,151,63,0.08);
+            padding: 3px 8px;
+            border-radius: 6px;
+            margin-bottom: 5px;
+        }
+        .bubble-type-badge i { font-size: 0.7rem; }
+
+        /* Date separator */
+        .date-separator {
+            text-align: center;
+            font-size: 0.7rem;
+            color: var(--text3);
+            margin: 12px 0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .date-separator::before, .date-separator::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border);
+        }
+
+        /* Input area */
+        .input-area {
+            padding: 12px 16px;
+            background: rgba(14,14,18,0.8);
+            border-top: 1px solid var(--border);
+            display: flex;
+            align-items: flex-end;
+            gap: 10px;
+            backdrop-filter: blur(10px);
+            flex-shrink: 0;
+        }
+
+        #messageInput {
+            flex: 1;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 11px 16px;
+            color: var(--text);
+            font-size: 0.875rem;
+            resize: none;
+            min-height: 44px;
+            max-height: 120px;
+            line-height: 1.45;
+            outline: none;
+            transition: border-color 0.2s;
+            font-family: inherit;
+        }
+        #messageInput:focus { border-color: rgba(201,151,63,0.4); }
+        #messageInput::placeholder { color: var(--text3); }
+
+        .send-btn {
+            width: 44px; height: 44px;
+            border-radius: 50%;
+            background: var(--gold);
+            border: none;
+            color: #000;
+            font-size: 0.9rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: all 0.2s;
+        }
+        .send-btn:hover { transform: scale(1.08); box-shadow: 0 4px 20px rgba(201,151,63,0.45); }
+
+        /* ══════════════════════════════════════════════
+           RIGHT PANEL — CRM + CONFIG
+        ══════════════════════════════════════════════ */
+        .right-panel {
+            width: 290px;
+            min-width: 270px;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 13px 8px;
+            background: none;
+            border: none;
+            color: var(--text3);
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-transform: uppercase;
+            border-bottom: 2px solid transparent;
+            font-family: inherit;
+        }
+        .tab-btn.active { color: var(--gold); border-bottom-color: var(--gold); }
+        .tab-btn i { margin-right: 5px; }
+
+        .tab-panel {
+            flex: 1;
+            overflow-y: auto;
+            padding: 18px;
+            display: none;
+            flex-direction: column;
+            gap: 14px;
+            scrollbar-width: thin;
+            scrollbar-color: #222 transparent;
+        }
+        .tab-panel.active { display: flex; }
+
+        /* CRM Contact Card */
+        .crm-contact-card {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .crm-contact-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--gold), var(--gold-light));
+        }
+
+        .crm-avatar-large {
+            width: 56px; height: 56px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #1a1a28, #12121c);
+            border: 2px solid var(--gold);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--gold);
+            margin: 0 auto 10px;
+        }
+
+        .crm-contact-name { font-weight: 700; font-size: 0.95rem; color: var(--text); margin-bottom: 2px; }
+        .crm-contact-phone { font-size: 0.75rem; color: var(--text3); }
+
+        /* Level badge */
+        .level-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            margin-top: 10px;
+            border: 1px solid;
+        }
+
+        /* Section title */
+        .section-title {
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text3);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 2px;
+        }
+        .section-title i { color: var(--gold); opacity: 0.7; }
+
+        /* Info rows */
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 9px 0;
+            border-bottom: 1px dashed rgba(255,255,255,0.04);
+            font-size: 0.82rem;
+        }
+        .info-row:last-child { border-bottom: none; }
+        .info-row .label { color: var(--text3); display: flex; align-items: center; gap: 6px; font-size: 0.78rem; }
+        .info-row .label i { color: var(--gold); opacity: 0.6; width: 14px; }
+        .info-row .value { color: var(--text); font-weight: 600; text-align: right; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* Stars */
+        .stars { color: var(--gold); font-size: 0.9rem; letter-spacing: 2px; text-align: center; }
+
+        /* Select styled */
+        .crm-select {
+            width: 100%;
+            background: var(--surface3);
+            border: 1px solid var(--border2);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            padding: 9px 12px;
+            font-size: 0.82rem;
+            font-family: inherit;
+            outline: none;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .crm-select:focus { border-color: var(--gold); }
+        .crm-select option { background: #111; }
+
+        /* Notes textarea */
+        .notes-area {
+            width: 100%;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            padding: 11px 14px;
+            font-size: 0.82rem;
+            resize: vertical;
+            min-height: 90px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+            line-height: 1.5;
+        }
+        .notes-area:focus { border-color: rgba(201,151,63,0.4); }
+        .notes-area::placeholder { color: var(--text3); }
+
+        /* Panel buttons */
+        .panel-btn {
+            width: 100%;
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border2);
+            background: rgba(255,255,255,0.03);
+            color: var(--text2);
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-family: inherit;
+        }
+        .panel-btn:hover { background: var(--gold-dim); border-color: rgba(201,151,63,0.3); color: var(--gold); transform: translateY(-1px); }
+        .panel-btn.success { background: var(--green-dim); border-color: rgba(46,204,113,0.2); color: var(--green); }
+        .panel-btn.success:hover { background: rgba(46,204,113,0.2); }
+        .panel-btn.danger { background: rgba(231,76,60,0.05); border-color: rgba(231,76,60,0.15); color: #e74c3c; }
+        .panel-btn.danger:hover { background: rgba(231,76,60,0.15); }
+
+        /* ══════════════════════════════════════════════
+           CONFIG IA PANEL
+        ══════════════════════════════════════════════ */
+        .config-toggle-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+        }
+        .config-toggle-row label { font-size: 0.82rem; color: var(--text); }
+
+        .config-field { display: flex; flex-direction: column; gap: 6px; }
+        .config-field label {
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text3);
+        }
+        .config-field input,
+        .config-field select,
+        .config-field textarea {
+            width: 100%;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            padding: 9px 12px;
+            font-size: 0.82rem;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+            box-sizing: border-box;
+        }
+        .config-field input:focus,
+        .config-field select:focus,
+        .config-field textarea:focus { border-color: rgba(201,151,63,0.4); }
+        .config-field select option { background: #111; }
+        .config-field textarea { resize: vertical; min-height: 100px; line-height: 1.45; }
+        .config-hint { font-size: 0.67rem; color: var(--text3); line-height: 1.4; }
+
+        /* Stats mini cards */
+        .stat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .stat-card {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            text-align: center;
+        }
+        .stat-card .stat-num { font-size: 1.4rem; font-weight: 700; color: var(--gold); }
+        .stat-card .stat-label { font-size: 0.65rem; color: var(--text3); text-transform: uppercase; letter-spacing: 0.8px; margin-top: 2px; }
+
+        /* ══════════════════════════════════════════════
+           SETUP MODAL
+        ══════════════════════════════════════════════ */
+        #setupModal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.85);
+            backdrop-filter: blur(12px);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-box {
+            background: var(--surface);
+            border: 1px solid rgba(201,151,63,0.3);
+            border-radius: 18px;
+            padding: 36px;
+            max-width: 440px;
+            width: 90%;
+            box-shadow: 0 40px 80px rgba(0,0,0,0.7);
+        }
+        .modal-box h2 { font-family: 'Cinzel', serif; color: var(--gold); font-size: 1.3rem; margin-bottom: 6px; }
+        .modal-box p { color: var(--text2); font-size: 0.82rem; margin-bottom: 22px; line-height: 1.5; }
+        .modal-field { margin-bottom: 14px; }
+        .modal-field label { display: block; font-size: 0.7rem; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 1px; }
+        .modal-field input {
+            width: 100%;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            padding: 10px 14px;
+            font-size: 0.85rem;
+            outline: none;
+            font-family: inherit;
+            box-sizing: border-box;
+        }
+        .modal-btn {
+            width: 100%;
+            padding: 13px;
+            background: var(--gold);
+            border: none;
+            border-radius: var(--radius-sm);
+            color: #000;
+            font-weight: 700;
+            font-size: 0.9rem;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        .modal-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+
+        /* ══════════════════════════════════════════════
+           MISC
+        ══════════════════════════════════════════════ */
+        @keyframes slideIn {
+            from { transform: translateX(100px); opacity: 0; }
+            to   { transform: none; opacity: 1; }
+        }
+
+        /* ══════════════════════════════════════════════
+           QUICK REPLIES
+        ══════════════════════════════════════════════ */
+        .quick-replies-bar {
+            display: flex;
+            gap: 6px;
+            padding: 8px 16px 0;
+            overflow-x: auto;
+            flex-shrink: 0;
+            scrollbar-width: none;
+        }
+        .quick-replies-bar::-webkit-scrollbar { display: none; }
+
+        .quick-reply-btn {
+            padding: 5px 12px;
+            border-radius: 16px;
+            border: 1px solid var(--border2);
+            background: rgba(255,255,255,0.04);
+            color: var(--text2);
+            font-size: 0.72rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+            font-family: inherit;
+        }
+        .quick-reply-btn:hover {
+            background: var(--gold-dim);
+            border-color: rgba(201,151,63,0.4);
+            color: var(--gold);
+            transform: translateY(-1px);
+        }
+
+        /* ══════════════════════════════════════════════
+           CRM TAGS
+        ══════════════════════════════════════════════ */
+        .crm-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+            justify-content: center;
+        }
+
+        .crm-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.65rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            background: rgba(231,76,60,0.1);
+            border: 1px solid rgba(231,76,60,0.25);
+            color: #e74c3c;
+        }
+
+        /* ══════════════════════════════════════════════
+           TOAST NOTIFICATIONS
+        ══════════════════════════════════════════════ */
+        .toast-notification {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            padding: 12px 22px;
+            border-radius: 10px;
+            color: #fff;
+            font-size: 0.82rem;
+            font-weight: 600;
+            font-family: 'Inter', sans-serif;
+            z-index: 10000;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+            animation: toastSlideIn 0.3s ease;
+            max-width: 360px;
+        }
+        @keyframes toastSlideIn {
+            from { transform: translateX(80px); opacity: 0; }
+            to   { transform: none; opacity: 1; }
+        }
+        .toast-notification.fade-out {
+            animation: toastFadeOut 0.3s ease forwards;
+        }
+        @keyframes toastFadeOut {
+            from { opacity: 1; transform: none; }
+            to   { opacity: 0; transform: translateX(40px); }
+        }
+
+        /* ══════════════════════════════════════════════
+           SOUND TOGGLE
+        ══════════════════════════════════════════════ */
+        .sound-toggle-btn {
+            width: 34px; height: 34px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.03);
+            color: var(--text3);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            font-size: 0.85rem;
+        }
+        .sound-toggle-btn:hover { background: var(--gold-dim); color: var(--gold); border-color: rgba(201,151,63,0.3); }
+
+        @media (max-width: 900px) {
+            .sidebar { width: 64px; min-width: 64px; }
+            .chat-body, .chat-time, .chat-badges { display: none; }
+            .right-panel { display: none; }
+        }
+        @media (max-width: 600px) {
+            .sidebar { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ══ TOP BAR ══════════════════════════════════════════════ -->
+    <div class="topbar">
+        <div class="topbar-brand">
+            <i class="fab fa-whatsapp"></i>
+            WhatsApp IA
+        </div>
+
+        <div class="topbar-center">
+            <div class="status-pill" id="wsPill" style="border-color:#e74c3c33;color:#e74c3c;background:rgba(231,76,60,0.06)" onclick="reconnectWA()">
+                <span class="dot" id="wsDot" style="background:#e74c3c"></span>
+                <span id="wsLabel">Desconectado</span>
+            </div>
+        </div>
+
+        <div class="topbar-actions">
+            <button class="sound-toggle-btn" id="soundToggle" title="Sonido de notificaciones">
+                <i class="fas fa-volume-up"></i>
+            </button>
+            <button class="topbar-btn" onclick="showSetupModal()">
+                <i class="fas fa-server"></i> Servidor
+            </button>
+            <button class="topbar-btn danger" onclick="disconnectWA()" title="Desconectar y generar nuevo QR">
+                <i class="fas fa-power-off"></i> Desconectar
+            </button>
+            <a href="../cursos.html" class="topbar-btn">
+                <i class="fas fa-graduation-cap"></i> Cursos
+            </a>
+        </div>
+    </div>
+
+    <!-- ══ APP ════════════════════════════════════════════════════ -->
+    <div class="app">
+
+        <!-- ── SIDEBAR ─────────────────────────────────────────── -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h3>Conversaciones</h3>
+                <div class="search-box">
+                    <i class="fas fa-search"></i>
+                    <input type="search" name="wa_search" id="chatSearch" placeholder="Buscar chat..." autocomplete="new-password" spellcheck="false" oninput="filterChats(this.value)">
+                </div>
+            </div>
+            <div class="chat-list" id="chatList">
+                <div class="chat-list-empty">
+                    <div class="spinner" style="margin:0 auto 16px;width:28px;height:28px;border-width:2px"></div>
+                    <p>Conectando...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── QR SECTION ─────────────────────────────────────── -->
+        <div id="qrSection" style="display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:28px;padding:40px;background:radial-gradient(ellipse at 50% 50%, rgba(201,151,63,0.04) 0%, transparent 70%)">
+
+            <div class="qr-title">
+                <h2><i class="fab fa-whatsapp"></i> Conectar WhatsApp</h2>
+                <p>Escanea el código QR con tu celular para activar el asistente IA</p>
+            </div>
+
+            <div class="qr-frame">
+                <div id="qrSpinner" style="width:220px;height:220px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px">
+                    <div class="spinner" style="width:40px;height:40px"></div>
+                    <p id="qrSpinnerText" style="color:var(--text3);font-size:0.8rem;text-align:center;max-width:160px;line-height:1.5">Conectando con el servidor...</p>
+                </div>
+                <img id="qrImage" src="" alt="QR WhatsApp" width="220" height="220" style="display:none;border-radius:4px">
+            </div>
+
+            <p id="qrMessage" style="color:var(--text2);text-align:center;font-size:0.85rem;max-width:360px;line-height:1.6"></p>
+
+            <div id="connDiag">
+                <div>🔌 Socket.io: <span id="diagWS" style="color:#e74c3c">Conectando...</span></div>
+                <div>📱 WhatsApp: <span id="diagWA" style="color:#888">Sin sesión</span></div>
+                <div>📡 Backend: <span style="color:#555">dra-andrea-whatsapp.onrender.com</span></div>
+            </div>
+
+            <div class="qr-steps">
+                <div class="qr-step"><i class="fab fa-whatsapp"></i>Abre WhatsApp en tu celular</div>
+                <div class="qr-step"><i class="fas fa-ellipsis-v"></i>Menú → Dispositivos vinculados</div>
+                <div class="qr-step"><i class="fas fa-qrcode"></i>Escanea el código</div>
+            </div>
+
+            <button class="qr-action-btn" onclick="clearSession()">
+                <i class="fas fa-sync-alt"></i> Generar nuevo QR
+            </button>
+        </div>
+
+        <!-- ── CHAT SECTION ──────────────────────────────────── -->
+        <div id="chatSection" style="flex:1;display:none;overflow:hidden">
+
+            <!-- Panel central -->
+            <div class="chat-main" style="display:flex;flex-direction:column;flex:1">
+
+                <!-- Header -->
+                <div class="chat-header">
+                    <div class="chat-header-left">
+                        <div class="chat-avatar" id="chatHeaderAvatar" style="width:38px;height:38px;font-size:0.95rem">?</div>
+                        <div class="header-info">
+                            <h4 id="chatHeaderName">Selecciona un chat</h4>
+                            <span class="header-phone" id="chatHeaderPhone"></span>
+                            <span id="chatPresence"></span>
+                        </div>
+                    </div>
+                    <div class="chat-header-right">
+                        <div class="ai-pill" id="aiPill">
+                            <label class="toggle">
+                                <input type="checkbox" id="aiToggle" checked onchange="toggleAI()">
+                                <div class="toggle-track"></div>
+                                <div class="toggle-thumb"></div>
+                            </label>
+                            <span id="aiToggleLabel">IA Activa</span>
+                        </div>
+                        <button class="icon-btn" onclick="reconnectWA()" title="Reconectar">
+                            <i class="fas fa-plug"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Chat vacío -->
+                <div id="chatEmptyState" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--text3)">
+                    <i class="fas fa-comments" style="font-size:3.5rem;opacity:0.08"></i>
+                    <h3 style="font-family:'Cinzel',serif;color:#22222e;font-size:1.1rem">Selecciona un chat</h3>
+                    <p style="font-size:0.8rem;color:#22222e">Elige una conversación de la lista</p>
+                </div>
+
+                <!-- Área de mensajes -->
+                <div id="chatArea" style="display:none;flex-direction:column;flex:1;overflow:hidden">
+                    <div id="messagesContainer"></div>
+                    <div class="quick-replies-bar" id="quickReplies"></div>
+                    <div class="input-area">
+                        <textarea id="messageInput" placeholder="Escribe un mensaje... (Enter para enviar)" rows="1"></textarea>
+                        <button class="send-btn" onclick="sendMessage()">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel derecho -->
+            <div class="right-panel">
+                <div class="panel-tabs">
+                    <button class="tab-btn active" onclick="openTab('tabCRM', this)"><i class="fas fa-user"></i>CRM</button>
+                    <button class="tab-btn" onclick="openTab('tabStats', this)"><i class="fas fa-chart-bar"></i>Stats</button>
+                    <button class="tab-btn" onclick="openTab('tabConfig', this)"><i class="fas fa-robot"></i>IA</button>
+                </div>
+
+                <!-- ── TAB: CRM ─────────────────────────────── -->
+                <div class="tab-panel active" id="tabCRM">
+
+                    <!-- Tarjeta de contacto -->
+                    <div class="crm-contact-card">
+                        <div class="crm-avatar-large" id="crmAvatarLarge">?</div>
+                        <div class="crm-contact-name" id="crmName">—</div>
+                        <div class="crm-contact-phone" id="crmPhone">—</div>
+                        <div id="crmLevelBadge" class="level-badge" style="border-color:#555;color:#555;background:rgba(255,255,255,0.03)">
+                            👋 NUEVO
+                        </div>
+                        <div class="stars" id="crmStars" style="margin-top:10px">☆☆☆☆☆</div>
+                        <div class="crm-tags" id="crmTags" style="display:none"></div>
+                    </div>
+
+                    <!-- Cambiar nivel -->
+                    <div>
+                        <div class="section-title"><i class="fas fa-chart-line"></i> Nivel de Lead</div>
+                        <select class="crm-select" id="crmLevelSelect" onchange="changeCRMLevel(this.value)">
+                            <option value="NUEVO">👋 NUEVO</option>
+                            <option value="INTERESADO">👀 INTERESADO</option>
+                            <option value="CALIENTE">🔥 CALIENTE</option>
+                            <option value="CLIENTE">🌟 CLIENTE</option>
+                        </select>
+                    </div>
+
+                    <!-- Info -->
+                    <div>
+                        <div class="section-title"><i class="fas fa-address-card"></i> Información</div>
+                        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 12px">
+                            <div class="info-row">
+                                <span class="label"><i class="fas fa-comments"></i> Interacciones</span>
+                                <span class="value" id="crmConversations">0</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label"><i class="fas fa-clock"></i> Último contacto</span>
+                                <span class="value" id="crmLastContact">—</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label"><i class="fas fa-robot"></i> Mensajes IA</span>
+                                <span class="value" id="crmAiMessages">—</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Notas -->
+                    <div>
+                        <div class="section-title"><i class="fas fa-sticky-note"></i> Notas Privadas</div>
+                        <textarea class="notes-area" id="crmNotes" placeholder="Agrega notas sobre este paciente (síntomas, intereses, historial)..."></textarea>
+                        <button class="panel-btn" onclick="saveCRMNote()" style="margin-top:8px">
+                            <i class="fas fa-save"></i> Guardar notas
+                        </button>
+                    </div>
+
+                    <!-- Acciones -->
+                    <div>
+                        <div class="section-title"><i class="fas fa-bolt"></i> Acciones</div>
+                        <div style="display:flex;flex-direction:column;gap:8px">
+                            <button class="panel-btn success" onclick="markAsClient()">
+                                <i class="fas fa-star"></i> Marcar como CLIENTE
+                            </button>
+                            <button class="panel-btn danger" onclick="clearConversationHistory()">
+                                <i class="fas fa-eraser"></i> Resetear Memoria IA
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── TAB: STATS ────────────────────────────── -->
+                <div class="tab-panel" id="tabStats">
+                    <div class="section-title"><i class="fas fa-chart-pie"></i> Resumen del Chat</div>
+                    <div class="stat-grid">
+                        <div class="stat-card">
+                            <div class="stat-num" id="statTotal">0</div>
+                            <div class="stat-label">Mensajes</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-num" id="statAI">0</div>
+                            <div class="stat-label">Resp. IA</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-num" id="statIn">0</div>
+                            <div class="stat-label">Recibidos</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-num" id="statOut">0</div>
+                            <div class="stat-label">Enviados</div>
+                        </div>
+                    </div>
+
+                    <div class="section-title" style="margin-top:6px"><i class="fas fa-users"></i> Total Chats Activos</div>
+                    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 12px">
+                        <div class="info-row">
+                            <span class="label"><i class="fas fa-comments"></i> Chats cargados</span>
+                            <span class="value" id="statTotalChats">0</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label"><i class="fas fa-bell"></i> No leídos</span>
+                            <span class="value" id="statUnread">0</span>
+                        </div>
+                    </div>
+
+                    <div class="section-title" style="margin-top:6px"><i class="fas fa-info-circle"></i> Estado del Sistema</div>
+                    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 12px">
+                        <div class="info-row">
+                            <span class="label"><i class="fas fa-server"></i> Backend</span>
+                            <span class="value" style="color:var(--green)">Render</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label"><i class="fas fa-wifi"></i> Socket</span>
+                            <span class="value" id="statSocket" style="color:var(--green)">Conectado</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label"><i class="fab fa-whatsapp"></i> WhatsApp</span>
+                            <span class="value" id="statWA" style="color:var(--green)">Activo</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── TAB: CONFIG IA ────────────────────────── -->
+                <div class="tab-panel" id="tabConfig">
+
+                    <div class="config-toggle-row">
+                        <label>Respuesta Automática IA</label>
+                        <label class="toggle">
+                            <input type="checkbox" id="cfgAutoReply" checked>
+                            <div class="toggle-track"></div>
+                            <div class="toggle-thumb"></div>
+                        </label>
+                    </div>
+
+                    <div class="config-field">
+                        <label>Modelo GPT</label>
+                        <select id="cfgModel">
+                            <option value="gpt-4o">GPT-4o ⭐ Recomendado</option>
+                            <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                            <option value="gpt-3.5-turbo">GPT-3.5 Turbo (Económico)</option>
+                        </select>
+                    </div>
+
+                    <div class="config-field">
+                        <label>Creatividad (0.1 – 1.0)</label>
+                        <input type="number" id="cfgTemperature" min="0.1" max="1.0" step="0.05" value="0.85">
+                        <span class="config-hint">0.85 = natural y cálida. 0.4 = más precisa.</span>
+                    </div>
+
+                    <div class="config-field">
+                        <label>Delay mínimo respuesta (seg)</label>
+                        <input type="number" id="cfgDelayMin" min="1" max="15" value="3">
+                        <span class="config-hint">Simula que la doctora está leyendo antes de responder</span>
+                    </div>
+
+                    <div class="config-field">
+                        <label>Prompt personalizado</label>
+                        <textarea id="cfgPrompt" placeholder="Deja vacío para usar el prompt por defecto. Usa {CURSOS} para inyectar la lista de cursos automáticamente."></textarea>
+                        <span class="config-hint">Si lo defines, reemplaza el prompt predeterminado. Incluye {CURSOS} para que la IA conozca tus cursos.</span>
+                    </div>
+
+                    <button class="panel-btn" style="padding:12px" onclick="saveAIConfig()">
+                        <i class="fas fa-save"></i> Guardar configuración
+                    </button>
+
+                    <div style="height:1px;background:var(--border);margin:4px 0"></div>
+
+                    <div class="section-title"><i class="fas fa-shield-alt"></i> Zona de peligro</div>
+                    <button class="panel-btn danger" onclick="disconnectWA()">
+                        <i class="fas fa-power-off"></i> Cerrar sesión WhatsApp
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ══ MODAL: CONFIGURAR SERVIDOR ════════════════════════════ -->
+    <div id="setupModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);z-index:9999;align-items:center;justify-content:center">
+        <div class="modal-box">
+            <h2><i class="fab fa-whatsapp"></i> Servidor Backend</h2>
+            <p>Configura la URL del servidor y el secreto de administrador.</p>
+            <div class="modal-field">
+                <label>URL del Backend</label>
+                <input type="url" id="backendUrlInput" placeholder="https://tu-proyecto.onrender.com">
+            </div>
+            <div class="modal-field">
+                <label>Secreto de Admin</label>
+                <input type="password" id="adminSecretInput" placeholder="ADMIN_SECRET">
+            </div>
+            <button class="modal-btn" onclick="saveSetup()">
+                <i class="fas fa-rocket"></i> Conectar Sistema
+            </button>
+            <button class="panel-btn" onclick="document.getElementById('setupModal').style.display='none'" style="margin-top:8px">
+                Cancelar
+            </button>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script type="module" src="../js/supabase-config.js"></script>
+    <script type="module" src="../js/auth-supabase.js"></script>
+    <script src="../js/security-guard.js"></script>
+    <script src="whatsapp.js?v=4"></script>
+</body>
+</html>
